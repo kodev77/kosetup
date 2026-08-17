@@ -1,0 +1,19 @@
+# kosetup forge access — installed as ~/.ssh/kosetup_config and pulled in via
+# `Include kosetup_config` at the top of ~/.ssh/config (done by bootstrap.sh).
+# kosetup_ed25519 is registered on GitHub + GitLab; Azure DevOps required the
+# kosetup_rsa key (org rejected ed25519), hence the different IdentityFile.
+
+Host github.com
+  User git
+  IdentityFile ~/.ssh/kosetup_ed25519
+  IdentitiesOnly yes
+
+Host gitlab.com
+  User git
+  IdentityFile ~/.ssh/kosetup_ed25519
+  IdentitiesOnly yes
+
+Host ssh.dev.azure.com
+  User git
+  IdentityFile ~/.ssh/kosetup_rsa
+  IdentitiesOnly yes

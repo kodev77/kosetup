@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Launch SimCity Classic 1989 via DOSBox. Game data lives in the repository1-c
+# repo (always cloned on every machine). Binary name varies by distro:
+# dosbox-staging tarball on Devuan, `dosbox` package (staging) on Arch.
+set -euo pipefail
+DOSBOX="$(command -v dosbox-staging || command -v dosbox)" \
+  || { echo "dosbox-staging (or dosbox) not installed" >&2; exit 1; }
+# repository1-c lives under ~/Work (omarchy) or ~/repo (old Devuan box)
+for _r in "$HOME/Work" "$HOME/repo"; do [ -d "$_r/repository1-c" ] && R1C="$_r/repository1-c" && break; done
+[ -n "${R1C:-}" ] || { echo "repository1-c not found under ~/Work or ~/repo" >&2; exit 1; }
+# cd into the game folder so the conf's relative `mount c "sim city"` resolves.
+cd "$R1C/L3/retro/gaming/SimCity Games/DOSBox - SimCity Classic - 1989"
+exec "$DOSBOX" -conf dosbox.linux.conf "$@"

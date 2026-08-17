@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Launch SimCity 2000 (1993) via DOSBox. Game data lives in the repository1-c
+# repo. Binary name varies by distro (see simcity-1989).
+#
+# Usage:
+#   simcity-2000              play the game
+#   simcity-2000 --setup      run INSTALL.EXE (audio config) — once
+set -euo pipefail
+DOSBOX="$(command -v dosbox-staging || command -v dosbox)" \
+  || { echo "dosbox-staging (or dosbox) not installed" >&2; exit 1; }
+# repository1-c lives under ~/Work (omarchy) or ~/repo (old Devuan box)
+for _r in "$HOME/Work" "$HOME/repo"; do [ -d "$_r/repository1-c" ] && R1C="$_r/repository1-c" && break; done
+[ -n "${R1C:-}" ] || { echo "repository1-c not found under ~/Work or ~/repo" >&2; exit 1; }
+cd "$R1C/L3/retro/gaming/SimCity Games/DOSBox - SimCity2000 - 1993"
+if [[ "${1:-}" == "--setup" ]]; then
+  exec "$DOSBOX" -conf dosbox.linux.conf -noautoexec \
+    -c "mount c \"sim city 2000\"" \
+    -c "c:" \
+    -c "INSTALL.EXE" \
+    -c "exit"
+fi
+exec "$DOSBOX" -conf dosbox.linux.conf "$@"

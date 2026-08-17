@@ -1,0 +1,15 @@
+# kosetup core packages — Debian/Devuan names
+git
+curl
+jq
+fzf
+ripgrep
+fd-find
+bat
+eza
+lazygit
+nnn
+tmux
+neovim
+universal-ctags
+build-essential

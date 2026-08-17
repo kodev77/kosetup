@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# snake-tile — fullscreen Snake in Matrix Vivid phosphor green; the playfield IS the terminal window.
+#              Cells are drawn 2 chars wide (██) so they look square. No border/HUD while playing —
+#              just the snake and food. Resizing the window re-fits the field (restarts the round).
+#
+# Usage: snake-tile [--auto] [tick_seconds]    (default step 0.13s; speeds up as you score)
+#   --auto, -a   start in autopilot (plays itself, auto-restarts on death) — also SNAKE_AUTO=1
+#   SNAKE_TICK   seconds per step (default 0.13)
+#   SNAKE_RESTART  seconds to wait before auto-restarting after a death in auto mode (default 10)
+#   SNAKE_FAIL_MIN / SNAKE_FAIL_MAX  auto mode "give up" score range, weighted high (default 15..50)
+#   SNAKE_HARD=1  start with autopilot hard mode on (always keeps a 1-cell gap when turning)
+#   SNAKE_STALL  auto-mode livelock budget as a multiple of board cells (default 1): give up after
+#                this many steps with no food eaten (catches hard-mode unreachable-food loops)
+#
+# Keys: h/j/k/l or arrows move · a autopilot · d hard (auto: keep a gap when turning) · space freeze
+#       p pause · t tileset · r restart · ? help · q quit
+set -u
+export LC_NUMERIC=C   # keep EPOCHREALTIME's decimal separator a dot
+
+# --- args ---
+auto=${SNAKE_AUTO:-0}; TICK_S=""
+for a in "$@"; do
+  case "$a" in
+    -a|--auto)    auto=1 ;;
+    -h|--help)    sed -n '2,12p' "$0"; exit 0 ;;
+    ''|*[!0-9.]*) ;;
+    *)            TICK_S=$a ;;
+  esac
+done
+BASE_TICK_US=$(awk -v s="${TICK_S:-${SNAKE_TICK:-0.13}}" 'BEGIN{printf "%d", s*1000000}')
+MIN_TICK_US=60000   # fastest step (floor as score climbs)
+AUTORESTART_US=$(( ${SNAKE_RESTART:-10} * 1000000 ))   # in auto mode, restart this long after a death
+# Auto games "give up" at a random score so they're not all long: each game draws a target in
+# [FAIL_MIN, FAIL_MAX], weighted toward the top (max of two draws → linear density, peak at max).
+FAIL_MIN=${SNAKE_FAIL_MIN:-15}; FAIL_MAX=${SNAKE_FAIL_MAX:-50}
+# Auto-mode livelock guard: if the autopilot goes this many steps without eating it's stuck (e.g. hard
+# mode where the food is unreachable behind the 1-cell buffer) → give up. Budget = SNAKE_STALL × board cells.
+STALL_MULT=${SNAKE_STALL:-1}
+
+# --- palette — custom Matrix Vivid truecolor green by default; the 'c' key toggles ANSI-ride mode
+#     (honours the brightness tiers as ONE hue via bold/bright/faint; follows the terminal preset). ---
+R=$'\e[0m'; BLINK=$'\e[5m'
+# OSC: custom mode forces the Matrix Vivid base (green-on-black) so it doesn't sit on the preset's bg;
+# ride modes lift it (terminal default) so the playfield follows the active preset. Reset on exit.
+BGON=$'\e]11;#000000\a'; FGON=$'\e]10;#33ff33\a'; BGOFF=$'\e]111\a'; FGOFF=$'\e]110\a'
+mode=0   # theme: 0 custom truecolor green · 1 ride-accent (blue slot) · 2 ride-green slot. 'c' cycles.
+
+# --- tilesets (head / body / food glyphs, each exactly 2 terminal columns wide; empty cell is "  ") ---
+# Cycle SHAPE with 't'. set_palette (re)builds these from the colour tiers; 'c' cycles the theme mode.
+TS_NAME=(blocks   braille)
+set_palette() {   # set head/body/food tiers from $mode, then (re)build the tileset glyph arrays
+  # Ride modes use 3 brightness levels of ONE hue (accent/green): head = bright (the prominent leader),
+  # tail/body = dim/faint tier (the fading trail, sys-tile track style), food = normal tier + blink.
+  case $mode in
+    1) P=$'\e[94m'; A=$'\e[34m'; D=$'\e[2;34m' ;;   # head=bright blue · food=blue · tail=faint/dim blue
+    2) P=$'\e[92m'; A=$'\e[32m'; D=$'\e[2;32m' ;;   # head=bright green · food=green · tail=faint/dim green
+    *) P=$'\e[38;2;95;255;143m'; A=$'\e[38;2;51;255;51m'; D=$'\e[38;2;67;144;79m' ;;
+  esac
+  TS_HEAD=("${P}██${R}"         "${P}⣿⣿${R}")
+  TS_BODY=("${D}██${R}"         "${D}⣿⣿${R}")
+  TS_FOOD=("${BLINK}${A}██${R}" "${BLINK}${A}⣿⣿${R}")
+  if (( mode )); then printf '%s%s' "$FGOFF" "$BGOFF"   # ride: follow the preset (lift forced bg/fg)
+  else printf '%s%s' "$FGON" "$BGON"; fi                 # custom: force Matrix Vivid green-on-black
+}
+set_palette
+HIDE=$'\e[?25l'; SHOW=$'\e[?25h'; HOME=$'\e[H'; CLR=$'\e[2J'; EOL=$'\e[K'
+
+cleanup() { printf '%s%s%s%s%s%s' "$R" "$FGOFF" "$BGOFF" "$CLR" "$HOME" "$SHOW"; }   # reset (incl. forced bg/fg), clear, home, show cursor
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
+
+strip_ansi() { local s=$1 re=$'\e\[[0-9;?]*[a-zA-Z]'; while [[ $s =~ $re ]]; do s=${s//"${BASH_REMATCH[0]}"/}; done; REPLY=$s; }
+
+# Terminal size -> field: W cells across (2 chars each), H cells down (one row each).
+read_size() {
+  if ! read -r ROWS COLS < <(stty size </dev/tty 2>/dev/null); then ROWS=24; COLS=80; fi
+  W=$(( (COLS - 2) / 2 ))   # minus left/right border (│), 2 chars per cell
+  H=$(( ROWS - 4 ))         # minus score line + top & bottom border + controls line
+  (( W < 4 )) && W=4; (( H < 4 )) && H=4
+}
+
+# --- game state ---
+place_food() {
+  local -A occ; local seg
+  for seg in "${snake[@]}"; do occ["$seg"]=1; done
+  if (( ${#snake[@]} >= W*H )); then won=1; gameover=1; return; fi
+  while :; do fr=$((RANDOM % H)); fc=$((RANDOM % W)); [[ -z "${occ["$fr $fc"]:-}" ]] && break; done
+}
+# Weighted give-up score for auto mode: max of two uniform draws biases toward FAIL_MAX.
+pick_fail_target() {
+  local span=$(( FAIL_MAX - FAIL_MIN )) u1 u2
+  (( span < 1 )) && { fail_target=$FAIL_MAX; return; }
+  u1=$(( RANDOM % (span+1) )); u2=$(( RANDOM % (span+1) ))
+  fail_target=$(( FAIL_MIN + (u1>u2 ? u1 : u2) ))
+}
+new_game() {
+  local cr=$((H/2)) cc=$((W/2))
+  snake=("$cr $((cc-2))" "$cr $((cc-1))" "$cr $cc")   # tail .. head, heading right
+  dr=0; dc=1; pdr=0; pdc=1; dir_locked=0
+  score=0; gameover=0; won=0; paused=0; frozen=0
+  stall=0; stall_max=$(( W*H*STALL_MULT )); (( stall_max<150 )) && stall_max=150
+  pick_fail_target
+  place_food
+}
+# Queue a turn; one per step (dir_locked) and never a 180° reversal.
+set_dir() { (( dir_locked )) && return; (( $1 == -dr && $2 == -dc )) && return; pdr=$1; pdc=$2; dir_locked=1; }
+advance() {
+  dr=$pdr; dc=$pdc; dir_locked=0; ate=0
+  local hr hc nr nc seg will_eat=0
+  read -r hr hc <<<"${snake[-1]}"
+  nr=$((hr+dr)); nc=$((hc+dc))
+  if (( nr<0 || nr>=H || nc<0 || nc>=W )); then gameover=1; return; fi
+  (( nr==fr && nc==fc )) && will_eat=1
+  local body=("${snake[@]}"); (( will_eat )) || body=("${body[@]:1}")   # tail vacates unless growing
+  for seg in "${body[@]}"; do [[ "$seg" == "$nr $nc" ]] && { gameover=1; return; }; done
+  snake+=("$nr $nc")
+  if (( will_eat )); then score=$((score+1)); ate=1; place_food; else snake=("${snake[@]:1}"); fi
+}
+cur_tick() { local t=$((BASE_TICK_US - score*2500)); (( t<MIN_TICK_US )) && t=$MIN_TICK_US; REPLY=$t; }
+
+# Autopilot: pick the next move. BFS shortest path to the food over free cells (cells are encoded as
+# r*W+c integers for speed; the tail is treated as free since it vacates). If the food is unreachable,
+# fall back to the safe move that keeps the most open space. Sets AUTO_DR/AUTO_DC.
+# Direction codes: 0=up(-1,0) 1=down(1,0) 2=left(0,-1) 3=right(0,1).
+autopilot() {
+  local hr hc head food i n=${#snake[@]} r c
+  read -r hr hc <<<"${snake[-1]}"; head=$((hr*W+hc)); food=$((fr*W+fc))
+  local -A blocked nearbody
+  for ((i=1; i<n; i++)); do read -r r c <<<"${snake[i]}"; blocked[$((r*W+c))]=1; done   # body except tail
+  # Hard mode: forbid cells orthogonally adjacent to the body (excluding head & tail), so the autopilot
+  # always leaves a 1-cell gap when turning and can never run flush alongside itself. (No-op otherwise.)
+  if (( hard )); then
+    for ((i=1; i<n-1; i++)); do
+      read -r r c <<<"${snake[i]}"
+      (( r>0 ))   && nearbody[$(( (r-1)*W+c ))]=1
+      (( r<H-1 )) && nearbody[$(( (r+1)*W+c ))]=1
+      (( c>0 ))   && nearbody[$(( r*W+(c-1) ))]=1
+      (( c<W-1 )) && nearbody[$(( r*W+(c+1) ))]=1
+    done
+  fi
+  # BFS
+  local -A seen fdir; local queue=("$head") qi=0 cur nb found=0 pd
+  seen[$head]=1
+  while (( qi < ${#queue[@]} )); do
+    cur=${queue[qi]}; ((qi++))
+    (( cur == food )) && { found=1; break; }
+    r=$((cur/W)); c=$((cur%W)); pd=${fdir[$cur]:-0}   # parent's first-step dir (scalar; assoc subscripts aren't arithmetic)
+    if (( r>0 ));    then nb=$((cur-W)); [[ -z "${seen[$nb]:-}${blocked[$nb]:-}${nearbody[$nb]:-}" ]] && { seen[$nb]=1; fdir[$nb]=$(( cur==head ? 0 : pd )); queue+=("$nb"); }; fi
+    if (( r<H-1 ));  then nb=$((cur+W)); [[ -z "${seen[$nb]:-}${blocked[$nb]:-}${nearbody[$nb]:-}" ]] && { seen[$nb]=1; fdir[$nb]=$(( cur==head ? 1 : pd )); queue+=("$nb"); }; fi
+    if (( c>0 ));    then nb=$((cur-1)); [[ -z "${seen[$nb]:-}${blocked[$nb]:-}${nearbody[$nb]:-}" ]] && { seen[$nb]=1; fdir[$nb]=$(( cur==head ? 2 : pd )); queue+=("$nb"); }; fi
+    if (( c<W-1 ));  then nb=$((cur+1)); [[ -z "${seen[$nb]:-}${blocked[$nb]:-}${nearbody[$nb]:-}" ]] && { seen[$nb]=1; fdir[$nb]=$(( cur==head ? 3 : pd )); queue+=("$nb"); }; fi
+  done
+  if (( found )); then
+    case "${fdir[$food]}" in 0) AUTO_DR=-1 AUTO_DC=0 ;; 1) AUTO_DR=1 AUTO_DC=0 ;; 2) AUTO_DR=0 AUTO_DC=-1 ;; 3) AUTO_DR=0 AUTO_DC=1 ;; esac
+    return
+  fi
+  # No path to food: take the non-reversing safe move with the most free neighbors (keeps space open).
+  # In hard mode "safe" also requires the 1-cell gap (nearbody cells are skipped); if no gap-respecting
+  # move exists the snake steers into a fatal move and dies rather than hugging its own body.
+  local best=-1 hasfatal=0 fdr_f=0 fdc_f=0 cand cdr cdc nr nc cnt d2 ar ac r2 c2
+  AUTO_DR=$dr; AUTO_DC=$dc
+  for cand in "-1 0" "1 0" "0 -1" "0 1"; do
+    read -r cdr cdc <<<"$cand"
+    (( cdr==-dr && cdc==-dc )) && continue
+    nr=$((hr+cdr)); nc=$((hc+cdc))
+    if (( nr<0||nr>=H||nc<0||nc>=W )) || [[ -n "${blocked[$((nr*W+nc))]:-}" ]]; then
+      hasfatal=1; fdr_f=$cdr; fdc_f=$cdc; continue          # wall or body → a move that ends the game
+    fi
+    [[ -n "${nearbody[$((nr*W+nc))]:-}" ]] && continue       # hard mode: never hug the body (no-op otherwise)
+    cnt=0
+    for d2 in "-1 0" "1 0" "0 -1" "0 1"; do
+      read -r ar ac <<<"$d2"; r2=$((nr+ar)); c2=$((nc+ac))
+      (( r2<0||r2>=H||c2<0||c2>=W )) && continue
+      [[ -z "${blocked[$((r2*W+c2))]:-}" ]] && ((cnt++))
+    done
+    (( cnt>best )) && { best=$cnt; AUTO_DR=$cdr; AUTO_DC=$cdc; }
+  done
+  (( best<0 && hard && hasfatal )) && { AUTO_DR=$fdr_f; AUTO_DC=$fdc_f; }   # no gap move: die, don't hug
+}
+
+# Draw the screen: a score line, a bordered playfield, snake + food. Every line is rewritten and
+# cleared to EOL each frame so nothing trails; the last line carries no newline (no scroll).
+render() {
+  local -A cell; local i n=${#snake[@]} r c row out bar=""
+  for ((i=0; i<n; i++)); do (( i==n-1 )) && cell["${snake[i]}"]=head || cell["${snake[i]}"]=body; done
+  (( gameover )) || cell["$fr $fc"]=food
+  for ((c=0; c<W; c++)); do bar+="──"; done
+  out="$HOME ${P}snake${R}  ${D}score${R} ${P}${score}${R}"
+  if (( frozen )); then out+="  ${A}· paused${R}"
+  else
+    (( auto )) && out+="  ${D}· auto${R}"
+    (( hard )) && out+="  ${A}· hard${R}"
+  fi
+  out+="${EOL}"$'\n'"${A}┌${bar}┐${R}${EOL}"$'\n'
+  for ((r=0; r<H; r++)); do
+    row="${A}│${R}"
+    for ((c=0; c<W; c++)); do
+      case "${cell["$r $c"]:-}" in
+        head) row+="${TS_HEAD[tileset]}" ;;
+        body) row+="${TS_BODY[tileset]}" ;;
+        food) row+="${TS_FOOD[tileset]}" ;;
+        *)    row+="  " ;;
+      esac
+    done
+    out+="${row}${A}│${R}${EOL}"$'\n'
+  done
+  out+="${A}└${bar}┘${R}${EOL}"$'\n'
+  # controls: moves on the left, "? help · q quit" right-aligned to the window width (no trailing newline)
+  local lbar=" ${P}← ↓ ↑ →${R} ${D}move ·${R} ${P}r${R} ${D}restart ·${R} ${P}q${R} ${D}quit${R}" rbar="${P}?${R} ${D}help${R}" gap pad
+  strip_ansi "$lbar"; local lw=${#REPLY}
+  strip_ansi "$rbar"; local rw=${#REPLY}
+  pad=$((COLS - lw - rw - 1)); (( pad<1 )) && pad=1   # -1 keeps a 1-space right margin
+  printf -v gap '%*s' "$pad" ''
+  out+="${lbar}${gap}${rbar}${EOL}"
+  printf '%s' "$out"
+}
+# Centered text overlay (help / pause / game-over) on a cleared screen.
+center_print() {
+  local arr=("$@") i line left top
+  printf '%s%s' "$CLR" "$HOME"
+  top=$(( (ROWS - ${#arr[@]}) / 2 )); (( top<0 )) && top=0
+  for ((i=0; i<top; i++)); do printf '\n'; done
+  for line in "${arr[@]}"; do
+    strip_ansi "$line"; left=$(( (COLS - ${#REPLY}) / 2 )); (( left<0 )) && left=0
+    printf '%*s%s\n' "$left" '' "$line"
+  done
+}
+show_help()  { center_print \
+  "${P}snake${R}" "" \
+  "${P}← ↓ ↑ →${R}  ${D}/ h j k l   move${R}" \
+  "${P}space${R} ${D}freeze${R}  ${P}p${R} ${D}pause${R}" \
+  "${P}a${R} ${D}autopilot${R} ${P}d${R} ${D}hard${R}" \
+  "${P}t${R} ${D}tileset${R}   ${P}r${R} ${D}restart${R}" \
+  "${P}c${R} ${D}theme${R}     ${P}q${R} ${D}quit${R}" \
+  "${P}?${R} ${D}help${R}" \
+  "" "${D}press any key to resume${R}"; }
+show_pause() { center_print "${A}❚❚ PAUSED${R}" "" "${D}p resume · q quit${R}"; }
+show_over()  { local m; (( won )) && m="YOU WIN" || m="GAME OVER"
+  center_print "${A}${m}${R}" "" "${P}score ${score}${R}" "" "${P}r${R} ${D}restart${R}   ${P}q${R} ${D}quit${R}"; }
+
+# --- main loop ---
+help=0; resized=0; AUTO_DR=0; AUTO_DC=0; over_us=0; ate=0; hard=${SNAKE_HARD:-0}; tileset=${SNAKE_TILESET:-0}
+(( tileset>=0 && tileset<${#TS_HEAD[@]} )) || tileset=0
+trap 'resized=1' WINCH
+read_size
+new_game
+printf '%s%s' "$HIDE" "$CLR"
+render
+last_us=${EPOCHREALTIME/./}
+
+while :; do
+  if IFS= read -rsn1 -t 0.03 key 2>/dev/null; then
+    [[ $key == $'\e' ]] && { IFS= read -rsn2 -t 0.01 rest 2>/dev/null; key+="$rest"; }
+    if (( help )); then
+      help=0; render
+    elif (( gameover )); then
+      case "$key" in
+        q|Q) exit 0 ;;
+        a|A) auto=$((auto^1)); (( auto )) && over_us=${EPOCHREALTIME/./} ;;
+        r|R) new_game; render; last_us=${EPOCHREALTIME/./} ;;
+      esac
+    else
+      case "$key" in
+        q|Q)                  exit 0 ;;
+        '?')                  help=1; show_help ;;
+        a|A)                  auto=$((auto^1)); (( auto )) || render ;;   # toggle autopilot
+        p|P)                  paused=$((paused^1)); (( paused )) && show_pause || render ;;
+        ' ')                  frozen=$((frozen^1)); render ;;   # freeze in place; redraw HUD only
+        t|T)                  tileset=$(( (tileset+1) % ${#TS_HEAD[@]} )); render ;;   # cycle tileset
+        d|D)                  hard=$((hard^1)); render ;;   # toggle autopilot hard mode (gap when turning)
+        c|C)                  mode=$(((mode+1)%3)); set_palette; render ;;   # cycle custom -> ride-accent -> ride-green
+        r|R)                  new_game; render; last_us=${EPOCHREALTIME/./} ;;
+        h|H|$'\e[D'|$'\eOD')  auto=0; set_dir 0 -1 ;;   # left  (manual key takes control)
+        l|L|$'\e[C'|$'\eOC')  auto=0; set_dir 0 1 ;;    # right
+        k|K|$'\e[A'|$'\eOA')  auto=0; set_dir -1 0 ;;   # up
+        j|J|$'\e[B'|$'\eOB')  auto=0; set_dir 1 0 ;;    # down
+      esac
+    fi
+  fi
+  if (( resized )); then resized=0; read_size; new_game; printf '%s' "$CLR"; render; last_us=${EPOCHREALTIME/./}; continue; fi
+  if (( gameover )); then            # in auto mode, silently restart after the delay
+    if (( auto )); then
+      now_us=${EPOCHREALTIME/./}
+      (( now_us - over_us >= AUTORESTART_US )) && { new_game; render; last_us=$now_us; }
+    fi
+    continue
+  fi
+  (( help || paused || frozen )) && continue
+  now_us=${EPOCHREALTIME/./}
+  cur_tick
+  if (( now_us - last_us >= REPLY )); then
+    (( auto && score < fail_target )) && { autopilot; set_dir "$AUTO_DR" "$AUTO_DC"; }   # at target: stop steering → crash
+    advance
+    if (( auto && ! gameover )); then   # livelock guard: no food in a whole board of steps → give up
+      (( ate )) && stall=0 || stall=$((stall+1))
+      (( stall >= stall_max )) && gameover=1
+    fi
+    if (( gameover )); then over_us=$now_us; show_over; else render; fi
+    last_us=$now_us
+  fi
+done

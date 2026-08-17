@@ -1,0 +1,20 @@
+# Include system defaults
+$include /etc/inputrc
+
+# Case-insensitive tab completion (Tab matches files regardless of case)
+set completion-ignore-case on
+
+# Treat - and _ as equivalent during completion (e.g. "my-file" matches "my_file")
+set completion-map-case on
+
+# Show ambiguous completions immediately instead of requiring double-Tab
+set show-all-if-ambiguous on
+
+# Show file type indicators (/, *, @) in completion lists, like ls -F
+set visible-stats on
+
+# Color the matching prefix in completion lists
+set colored-completion-prefix on
+
+# Color completion matches by file type (like ls --color)
+set colored-stats on

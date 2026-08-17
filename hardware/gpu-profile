@@ -1,0 +1,48 @@
+#!/bin/sh
+# gpu-profile — switch the ASUS ROG platform (thermal/power) profile.
+# Modes map to /sys/firmware/acpi/platform_profile: quiet | balanced | performance
+# Usage:
+#   gpu-profile                 show current profile
+#   gpu-profile silent          set Silent  (quiet)
+#   gpu-profile balanced        set Balanced
+#   gpu-profile performance     set Performance
+#   gpu-profile cycle           silent -> balanced -> performance -> silent ...
+# Writing requires the node to be group-writable by 'video' (set in /etc/rc.local).
+
+PP=/sys/firmware/acpi/platform_profile
+
+set_profile() {
+    if ! echo "$1" > "$PP" 2>/dev/null; then
+        echo "gpu-profile: cannot write $PP (need root or 'video' group write perm)" >&2
+        exit 1
+    fi
+}
+
+notify() {
+    # Best-effort desktop notification; silent if notify-send is absent.
+    command -v notify-send >/dev/null 2>&1 && \
+        notify-send -t 1500 -i cpu "GPU profile" "$1" 2>/dev/null
+}
+
+cur=$(cat "$PP" 2>/dev/null)
+
+case "$1" in
+    silent|quiet)         set_profile quiet ;;
+    balanced|bal)         set_profile balanced ;;
+    performance|perf|max) set_profile performance ;;
+    cycle)
+        case "$cur" in
+            quiet)       set_profile balanced ;;
+            balanced)    set_profile performance ;;
+            *)           set_profile quiet ;;
+        esac ;;
+    ""|status|get)
+        echo "$cur"; exit 0 ;;
+    *)
+        echo "usage: gpu-profile [silent|balanced|performance|cycle|status]" >&2
+        exit 2 ;;
+esac
+
+new=$(cat "$PP")
+echo "$new"
+notify "$new"

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Unmount all ARCADE1 drive shares under ~/arcade1/.
+set -uo pipefail
+BASE="$HOME/arcade1"
+for mp in "$BASE"/*/; do
+  mp="${mp%/}"
+  if mountpoint -q "$mp"; then
+    if sudo umount "$mp"; then echo "unmounted $mp"; else echo "FAILED to unmount $mp" >&2; fi
+  fi
+done

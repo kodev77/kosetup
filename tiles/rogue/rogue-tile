@@ -1,0 +1,1801 @@
+#!/usr/bin/env bash
+# rogue-tile — a tiny fullscreen roguelike in ko-matrix phosphor green. Explore a dungeon of rooms
+#              joined by corridors: the map is dark until you walk it; entering a room lights it up.
+#              Descend `>` / ascend `<` through persistent floors. Floors group into REALMS, each a chain of
+#              star-gated SEGMENTS: collect a segment's stars (spread across its floors) to spawn the key on
+#              its BOSS floor and unlock that floor's `>`. Visited floors are remembered. Turn-based.
+#
+# Usage: rogue-tile          (fills the terminal window; resize regenerates the level)
+#
+# Keys: h/j/k/l or arrows move · Alt run · Ctrl jump · > descend · < ascend · r reroll · c theme · t tileset · ? help · q quit
+set -u
+
+case "${1:-}" in -h|--help) sed -n '2,9p' "$0"; exit 0 ;; esac
+
+# --- palette — custom Matrix Vivid truecolor green by default; 'c' CYCLES the theme: custom -> ride-accent
+#     (slot 4) -> ride-green (slot 2). Ride modes QUERY the live terminal (bg + the slot hue) and synthesize the
+#     @/lit/seen/unexplored tiers in truecolor, anchored to the bg so the gradient contrasts on ANY theme —
+#     dark or light, any slot colour (inverting the hue only if it's genuinely illegible). See set_palette.
+#     Semantic glyphs (gold key, cyan, stair bgs, knockout) keep their ANSI palette hue. Per-session. ---
+R=$'\e[0m'; BLINK=$'\e[5m'; BOLD=$'\e[1m'; REV=$'\e[7m'   # attributes (palette-independent)
+mode=0   # theme: 0 custom truecolor · 1 ride-accent (slot 4) · 2 ride-green (slot 2). 'c' cycles.
+# OSC colour query: $1 = full request string ($'\e]11;?\e\\' = background, $'\e]4;2;?\e\\' = palette slot 2).
+# Sets globals QR/QG/QB (0-255) in THIS shell and returns 0, or returns 1 if the terminal doesn't answer in
+# time. Sets GLOBALS rather than printing on purpose: the /dev/tty read must run in the CALLER's shell —
+# reading the reply from inside a $()/<() subshell is unreliable and silently fails (that bug made ride mode
+# fall back to flat ANSI tiers). Ride mode queries the live bg + hue and builds a contrast-anchored truecolor
+# ramp from them, so it stays legible on ANY theme (dark or light bg, any slot-2/4 colour).
+QR=0 QG=0 QB=0
+osc_color() {
+  local reply
+  printf '%s' "$1" >/dev/tty 2>/dev/null                     # reply: \e]…;rgb:RRRR/GGGG/BBBB ST
+  IFS= read -rs -d $'\\' -t 0.2 reply </dev/tty 2>/dev/null   # ST ends in '\'; BEL-terminated terms just time out, reply still captured
+  [[ $reply =~ rgb:([0-9a-fA-F]{2,4})/([0-9a-fA-F]{2,4})/([0-9a-fA-F]{2,4}) ]] || return 1
+  QR=$(( 16#${BASH_REMATCH[1]:0:2} )) QG=$(( 16#${BASH_REMATCH[2]:0:2} )) QB=$(( 16#${BASH_REMATCH[3]:0:2} ))   # high byte of each 16-bit component
+}
+# mix OUTVAR PREFIX  R G B  TR TG TB  FRAC -> printf -v OUTVAR an SGR (PREFIX '38'=fg / '48'=bg / '1;38'=bold fg)
+# of colour (R,G,B) blended FRAC% of the way toward (TR,TG,TB). The ride ramp is all blends toward the bg (dim
+# tiers) or toward the contrast extreme (the player), so it adapts to the theme instead of assuming dark-on-black.
+mix() {
+  printf -v "$1" '\e[%s;2;%d;%d;%dm' "$2" \
+    $(( $3+(($6-$3)*$9)/100 )) $(( $4+(($7-$4)*$9)/100 )) $(( $5+(($8-$5)*$9)/100 ))
+}
+set_palette() {
+  # Ride modes build the @/lit/seen/unexplored tiers in TRUECOLOR, anchored to the LIVE terminal so they
+  # contrast on ANY theme: query the background (OSC 11) + the ride hue (slot 4 accent / slot 2 green). If the
+  # hue's luminance sits too close to the bg, INVERT it (and if still muddy — gray-on-gray — push it to the
+  # contrasting end). Then lit = the hue at full; seen/unexplored fade TOWARD the bg; the player pushes toward
+  # the opposite extreme (white on dark themes, black on light) so it always pops; the HUD bar = bg tinted
+  # toward the hue, so it flips dark-bar/light-bar with the theme. Falls back to ANSI if the query goes
+  # unanswered. Semantic glyphs (gold key/money, cyan, stair bgs) keep their ANSI palette hue in ride modes.
+  case $mode in
+    1|2)
+      local _slot=4; (( mode==2 )) && _slot=2
+      if osc_color $'\e]4;'"$_slot"$';?\e\\'; then
+        local hr=$QR hg=$QG hb=$QB kr=0 kg=0 kb=0                      # h* = ride hue ; k* = background (default black)
+        osc_color $'\e]11;?\e\\' && { kr=$QR kg=$QG kb=$QB; }
+        # Legibility = WCAG-style CONTRAST RATIO of hue luma vs bg luma, NOT a luma difference and NOT RGB
+        # distance. The ratio (with the +13 ~= 0.05 floor, luma on a 0-255 scale) lets a saturated mid blue read
+        # on a dark bg (ratio ~2.7, kept) while a light hue on a light bg reads poorly (~1.4, flipped). Threshold
+        # is 2 (NOT 3): the theme's own colours are respected unless genuinely illegible — a 2.7:1 blue is a
+        # visible blue, just low-contrast by the theme's design, and the user would rather see it than an
+        # inverted hue. Invert when ratio < 2; if STILL < 2 (mid-gray on mid-gray) shove it to the extreme.
+        local yk=$(( (kr*299+kg*587+kb*114)/1000 )) yh=$(( (hr*299+hg*587+hb*114)/1000 )) ymax ymin
+        ymax=$(( yh>yk?yh:yk )) ymin=$(( yh<yk?yh:yk ))
+        if (( ymax+13 < 2*(ymin+13) )); then                          # contrast ratio < 2 -> invert hue (luma flips to 255-yh)
+          hr=$((255-hr)) hg=$((255-hg)) hb=$((255-hb)) yh=$((255-yh))
+          ymax=$(( yh>yk?yh:yk )) ymin=$(( yh<yk?yh:yk ))
+        fi
+        local ink=0; (( yk<128 )) && ink=255                          # contrast extreme away from the bg
+        if (( ymax+13 < 2*(ymin+13) )); then                          # still ratio<2 (e.g. mid-gray on mid-gray) -> shove to the extreme
+          hr=$(( hr+(ink-hr)*60/100 )) hg=$(( hg+(ink-hg)*60/100 )) hb=$(( hb+(ink-hb)*60/100 ))
+        fi
+        printf -v A '\e[38;2;%d;%d;%dm' "$hr" "$hg" "$hb"             # lit = the (contrast-corrected) hue at full
+        mix D   38     "$hr" "$hg" "$hb" "$kr"  "$kg"  "$kb"  45       # seen: 45% toward the bg
+        mix DK  38     "$hr" "$hg" "$hb" "$kr"  "$kg"  "$kb"  72       # unexplored: 72% toward the bg (fades in)
+        mix P   "1;38" "$hr" "$hg" "$hb" "$ink" "$ink" "$ink" 35       # player: 35% toward the contrast extreme (always pops)
+        mix BAR 48     "$kr" "$kg" "$kb" "$hr"  "$hg"  "$hb"  18       # HUD bar: bg tinted toward the hue (flips dark/light with theme)
+      elif (( mode==1 )); then   # terminal won't answer the query -> ANSI bright/normal/faint (2-level, still rides)
+        P=$'\e[1;94m'; A=$'\e[94m'; D=$'\e[34m'; DK=$'\e[2;34m'; BAR=$'\e[100m'
+      else
+        P=$'\e[1;92m'; A=$'\e[92m'; D=$'\e[32m'; DK=$'\e[2;32m'; BAR=$'\e[100m'
+      fi
+      STAR=$A; HUDDIM=$DK
+      GOLD=$'\e[93m'; CYAN=$'\e[96m'; SBG=$'\e[42m'; SBGL=$'\e[41m'; BLK=$'\e[30m' ;;
+    *) P=$'\e[38;2;95;255;143m'; A=$'\e[38;2;51;255;51m'; D=$'\e[38;2;67;144;79m'; DK=$'\e[38;2;32;72;42m'
+       GOLD=$'\e[38;2;255;210;74m'   # amber — KEY ⚷, money $, HUD gold
+       STAR=$'\e[38;2;51;255;51m'    # stars ✱ — phosphor green; collect all to reveal the key
+       CYAN=$'\e[38;2;0;255;255m'    # pure cyan — hall monitor & / alt up-stairs
+       SBG=$'\e[48;2;51;255;51m'     # DOWN unlocked — green block bg, black knockout ≡
+       SBGL=$'\e[48;2;255;95;95m'    # DOWN locked — red block bg, black knockout ≡
+       BLK=$'\e[38;2;0;0;0m'         # knockout black ≡ (bg colour is the lock tell)
+       BAR=$'\e[48;2;16;42;16m'      # status-bar bg — dark phosphor green (#102A10), Infocom/Zork-style
+       HUDDIM=$'\e[38;2;32;72;42m' ;; # HUD 'deeper-floor' pip — DK, stays visible on the BAR
+  esac
+}
+set_palette
+
+# --- tileset — 't' switches the map LOOK (the logical tiles in TILE never change; only how they're DRAWN) ---
+# tmode 0 = the default: the original look — green '#' walls, green-dot floors/corridors, classic ASCII glyphs.
+# tmode 1 = DOS / Epyx Rogue: double-line ORANGE walls (═║╔╗╚╝), GRAY '▒' corridor blocks, amber doors, green
+# floors — all standard Unicode (no special font). The DOS set uses its OWN fixed colours (orange/gray, the
+# DOS_* SGRs by the box-wall helpers), overriding the 'c' theme; entities are the same classic ASCII either way.
+# Per-session, like the 'c' theme. set_tiles fills the T* glyph vars + the TDOS flag that render()/cell_str() read.
+tmode=0
+set_tiles() {
+  TWALL='#'; TFLOOR='·'; TCORR=$'▒'; TDOWN='≡'; TUP='≡'        # glyphs shared by both looks (entities are classic ASCII either way)
+  TGOLD='$'; TSTAR='✱'; TKEY='⚷'; TMON='&'; TPLAYER='@'
+  case $tmode in
+    1) TDOS=1 ;;   # DOS / Epyx Rogue terrain (box walls + gray corridors + doors) with fixed orange/gray colours
+    *) TDOS=0 ;;   # default: plain green '#' walls, green-dot corridors, no door glyphs
+  esac
+}
+set_tiles
+
+GUTTER=2                       # blank columns of breathing room on each side of the map (tunable)
+SCOUT=2                        # run (Alt) and jump (Ctrl) both uncover stars/key up to this many tiles off their path (a wider "scout" sweep)
+HALL_MAXLEN=60                 # transition-hall length cap (tiles) — keeps medium/large windows from spawning an absurdly long hall; small windows are under this anyway
+CORR_MAXLEN=60                 # room-to-room corridor length cap (tiles) — rooms cluster within this of a neighbour + the strict connect rejects longer halls, so wide windows don't grow giant corridors
+# Empty (between-segments) pass-through floors. Each of a realm's inter-segment boundaries independently gets
+# 0 or 1 empty floor (EMPTY1_PCT). A realm may ALSO get a single BACK-TO-BACK pair (one boundary bumped to 2
+# empties in a row — the cap): a random per-realm "want" roll (B2B_PCT), GRANTED only if the PREVIOUS realm had
+# none, so doubles never land in consecutive realms and a realm never has more than one. Every realm is still
+# GUARANTEED >=1 empty floor (forced if every boundary rolled 0). Real segment floors always separate
+# boundaries, so 3+ empties in a row is impossible.
+EMPTY1_PCT=45                  # per boundary: chance of ONE empty floor (else none)
+B2B_PCT=35                     # per realm: chance it WANTS its single back-to-back pair (granted only if the previous realm had none)
+# --- toll (the `&` hall monitor) ---------------------------------------------
+# A nerdy hall-monitor NPC `&` blocks a transition hall and demands a toll to let the hero pass. He spawns in a
+# random subset of (first) halls; his fee is a % of the gold that was dropped across the segment he gates, so
+# you must have collected most of that segment's gold to get by. Gold values are fixed at placement, so the
+# total is known and the toll is deterministic.
+TOLL_PCT=60                    # chance a (first) transition hall has a toll-collecting hall monitor
+TOLL_FRAC=85                   # his fee = this % of the gold dropped since the previous toll
+# --- scoring (efficiency multiplier, all tunable) ----------------------------
+# Each star and the key score the MOMENT you grab them, worth their base * the current efficiency multiplier =
+# how much of your movement THIS phase was new ground vs re-treading your own path. A segment runs in two
+# phases (1 = find its stars, 2 = find its key); the tracker resets at the boundary, so travelling to a far
+# key isn't punished — only circling within a phase is. So a cleanly-found star pays more than a backtracked one.
+M_MIN=50; M_MAX=300; MULT_K=400   # multiplier x100: clamp [0.5x, 3.0x]; (new/steps %) * MULT_K / 100
+STAR_PTS=10                       # base points per star (x current multiplier)
+KEY_PTS=100                       # base points for the key (x current multiplier)
+HIDE=$'\e[?25l'; SHOW=$'\e[?25h'; HOME=$'\e[H'; CLR=$'\e[2J'; EOL=$'\e[K'
+# Focus reporting: the terminal sends \e[I on focus-in / \e[O on focus-out. We re-query the live theme on
+# focus-in (in ride modes) so changing the terminal's colour scheme while away — e.g. in its Preferences — and
+# clicking back updates the palette without pressing 'c'. Disabled on exit so the shell doesn't keep getting them.
+FOCUSON=$'\e[?1004h'; FOCUSOFF=$'\e[?1004l'
+# Force the Matrix Vivid base (green-on-black) while the game runs, regardless of the active terminal
+# scheme: OSC 11/10 set the default bg/fg (so every \e[0m reset lands on black, not the scheme's bg).
+# OSC 111/110 reset bg/fg to the scheme defaults on exit (VTE/xterm). Falls through harmlessly elsewhere.
+BGON=$'\e]11;#000000\a'; FGON=$'\e]10;#33ff33\a'; BGOFF=$'\e]111\a'; FGOFF=$'\e]110\a'
+
+cleanup() { [[ -n ${STTY_SAVE:-} ]] && stty "$STTY_SAVE" </dev/tty 2>/dev/null; printf '%s%s%s%s%s%s%s' "$R" "$FOCUSOFF" "$FGOFF" "$BGOFF" "$CLR" "$HOME" "$SHOW"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM HUP QUIT   # restore tty on Ctrl+C/\, terminal close, kill (SIGKILL is the only uncatchable case)
+
+strip_ansi() { local s=$1 re=$'\e\[[0-9;?]*[a-zA-Z]'; while [[ $s =~ $re ]]; do s=${s//"${BASH_REMATCH[0]}"/}; done; REPLY=$s; }
+
+# base36-encode an integer -> compact uppercase code (used to pack mapseed+W+H into one shareable seed hash).
+to_b36() { local n=$1 d=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ s=''; (( n==0 )) && { REPLY=0; return; }; while (( n>0 )); do s="${d:n%36:1}$s"; n=$(( n/36 )); done; REPLY=$s; }
+
+# Terminal size -> map: W tiles across (1 char each), H tiles down. Borderless: row 1 is the full-width
+# status bar (Zork-style), the rest is the map; controls live in the `?` overlay, stats/seed in the `m` overlay. The bottom terminal row
+# is left unused (some terminals clip/scroll a glyph written into the last cell).
+read_size() {
+  if ! read -r ROWS COLS < <(stty size </dev/tty 2>/dev/null); then ROWS=24; COLS=80; fi
+  W=$(( COLS-2*GUTTER )); H=$(( ROWS-1 ))   # row 1 = status bar; GUTTER-col gutter each side; map fills down to the last row (right gutter keeps the bottom-right cell blank, so no scroll)
+  (( W < 12 )) && W=12; (( H < 7 )) && H=7
+}
+
+carve() { (( $1>=0 && $1<H && $2>=0 && $2<W )) && [[ "${TILE[$1*W+$2]}" != '>' ]] && TILE[$1*W+$2]='·'; }
+
+# lay r c — carve a corridor tile, OR (CHECKMODE=1) just test whether it would cross a NON-endpoint room's
+# interior (sets BLOCKED). Lets connect() double as both the carver and a "does this corridor cross a room?"
+# probe, so the spanning tree can skip edges whose corridor would tunnel through a third room.
+lay() {
+  (( $1<0 || $1>=H || $2<0 || $2>=W )) && return
+  local r=$1 c=$2 idx=$(( $1*W+$2 ))
+  if (( CHECKMODE )); then
+    local o=${OCC[idx]:--1}; (( o>=0 && o!=CA && o!=CB )) && { BLOCKED=1; return; }
+    if (( CHKCORR )); then          # keep >=2 walls between corridors => no double-wide AND no jittery 1-wall parallel tracks
+      (( ${CORR[idx]:-0} )) && { BLOCKED=1; return; }
+      (( c>0   && ${CORR[idx-1]:-0} )) && BLOCKED=1
+      (( c<W-1 && ${CORR[idx+1]:-0} )) && BLOCKED=1
+      (( r>0   && ${CORR[idx-W]:-0} )) && BLOCKED=1
+      (( r<H-1 && ${CORR[idx+W]:-0} )) && BLOCKED=1
+      (( c>1   && ${CORR[idx-2]:-0} )) && BLOCKED=1     # distance-2 orthogonal: rejects "corr · wall · corr" parallel runs
+      (( c<W-2 && ${CORR[idx+2]:-0} )) && BLOCKED=1
+      (( r>1   && ${CORR[idx-2*W]:-0} )) && BLOCKED=1
+      (( r<H-2 && ${CORR[idx+2*W]:-0} )) && BLOCKED=1
+      (( r>0   && c>0   && ${CORR[idx-W-1]:-0} )) && BLOCKED=1     # diagonals: no staircase-adjacent corridors either
+      (( r>0   && c<W-1 && ${CORR[idx-W+1]:-0} )) && BLOCKED=1
+      (( r<H-1 && c>0   && ${CORR[idx+W-1]:-0} )) && BLOCKED=1
+      (( r<H-1 && c<W-1 && ${CORR[idx+W+1]:-0} )) && BLOCKED=1
+    fi
+  else
+    [[ "${TILE[idx]}" != '>' ]] && TILE[idx]='·'; CORR[idx]=1
+  fi
+}
+
+# Join two rooms A,B with a corridor. They never overlap (rooms are rejection-sampled with a GAP), so
+# they are either vertically stacked (share columns -> STRAIGHT vertical hall), side by side (share rows
+# -> STRAIGHT horizontal hall), or diagonal (-> an L corridor whose BOTH legs are >=3 tiles, with the
+# turn out in the gap). Doors sit >=2 tiles from room corners (rooms are >=4 long; >=5 normally).
+# Hug tests: does a horizontal corridor segment (row,c1..c2) run parallel within CLR of any room's
+# top/bottom wall, OR a vertical segment (col,r1..r2) within CLR of a room's left/right wall, while
+# overlapping that room's body? If so it "hugs" the wall -> set HUG (rejected by the strict pass).
+hseg() {
+  local rr=$1 a1=$2 a2=$3 i ry ryb rxl rxr
+  (( a1>a2 )) && { local tt=$a1; a1=$a2; a2=$tt; }
+  for ((i=0; i<NROOMS; i++)); do
+    rxl=${ROOMx[i]}; rxr=$(( ROOMx[i]+ROOMw[i]-1 ))
+    (( a2<rxl || a1>rxr )) && continue
+    ry=${ROOMy[i]}; ryb=$(( ROOMy[i]+ROOMh[i]-1 ))
+    (( (rr<ry && ry-rr<=HUGCLR) || (rr>ryb && rr-ryb<=HUGCLR) )) && { HUG=1; return; }
+  done
+}
+vseg() {
+  local cc=$1 a1=$2 a2=$3 i ry ryb rxl rxr
+  (( a1>a2 )) && { local tt=$a1; a1=$a2; a2=$tt; }
+  for ((i=0; i<NROOMS; i++)); do
+    ry=${ROOMy[i]}; ryb=$(( ROOMy[i]+ROOMh[i]-1 ))
+    (( a2<ry || a1>ryb )) && continue
+    rxl=${ROOMx[i]}; rxr=$(( ROOMx[i]+ROOMw[i]-1 ))
+    (( (cc<rxl && rxl-cc<=HUGCLR) || (cc>rxr && cc-rxr<=HUGCLR) )) && { HUG=1; return; }
+  done
+}
+connect() {
+  CA=$1; CB=$2
+  local a=$1 b=$2 r c lo hi col row cl ch rl rh arow brow acol bcol t u dA dB tr tc wt wb rowsdis=0 colsdis=0
+  local tlo thi ulo uhi m l1 l2 lj SIDEA=0 SIDEB=0 HUG=0 jlo jhi JOG=99 mwt mwu mht mhu
+  local axl=${ROOMx[a]} ayt=${ROOMy[a]} axr=$(( ROOMx[a]+ROOMw[a]-1 )) ayb=$(( ROOMy[a]+ROOMh[a]-1 ))
+  local bxl=${ROOMx[b]} byt=${ROOMy[b]} bxr=$(( ROOMx[b]+ROOMw[b]-1 )) byb=$(( ROOMy[b]+ROOMh[b]-1 ))
+  local hia=$(( ROOMw[a]>=5?2:1 )) hib=$(( ROOMw[b]>=5?2:1 )) via=$(( ROOMh[a]>=5?2:1 )) vib=$(( ROOMh[b]>=5?2:1 ))
+  MINLEG=99
+  (( ayb<byt || byb<ayt )) && rowsdis=1     # one room clearly above the other
+  (( axr<bxl || bxr<axl )) && colsdis=1     # one room clearly left of the other
+  # Which WALL of each room the corridor docks on (0=top 1=bottom 2=left 3=right) -> enforce <=1 hallway per side.
+  if (( rowsdis && colsdis )); then
+    if (( bxl>axr )); then SIDEA=3; else SIDEA=2; fi    # A entered horizontally (the L's first leg)
+    if (( byt>ayb )); then SIDEB=0; else SIDEB=1; fi    # B entered vertically (the L's second leg)
+  elif (( rowsdis )); then
+    if (( ayb<byt )); then SIDEA=1; SIDEB=0; else SIDEA=0; SIDEB=1; fi
+  else
+    if (( axr<bxl )); then SIDEA=3; SIDEB=2; else SIDEA=2; SIDEB=3; fi
+  fi
+  if (( CHECKMODE && CHKSIDE )); then        # probe: refuse a 2nd hallway on a side already taken
+    (( ${SIDE_USED[a*4+SIDEA]:-0} || ${SIDE_USED[b*4+SIDEB]:-0} )) && { BLOCKED=1; return; }
+  fi
+  if (( CHECKMODE && CHKLEN )); then          # probe: refuse a corridor longer than CORR_MAXLEN (wall-gap sum ~ its carved length)
+    local dgx=0 dgy=0
+    if (( colsdis )); then (( axr<bxl )) && dgx=$(( bxl-axr-1 )) || dgx=$(( axl-bxr-1 )); fi
+    if (( rowsdis )); then (( ayb<byt )) && dgy=$(( byt-ayb-1 )) || dgy=$(( ayt-byb-1 )); fi
+    (( dgx+dgy > CORR_MAXLEN )) && { BLOCKED=1; return; }
+  fi
+  if (( rowsdis && colsdis )); then     # fully DIAGONAL -> clean L corridor (both legs >=3, turn in the gap)
+    if (( bxl>axr )); then acol=$(( axr+1 )); bcol=$(( bxl+hib )); else acol=$(( axl-1 )); bcol=$(( bxr-hib )); fi
+    if (( byt>ayb )); then arow=$(( ayb-via )); brow=$(( byt-1 )); else arow=$(( ayt+via )); brow=$(( byb+1 )); fi
+    lo=$acol; hi=$bcol; (( lo>hi )) && { lo=$bcol; hi=$acol; };  for ((c=lo; c<=hi; c++)); do lay "$arow" "$c"; done
+    lo=$arow; hi=$brow; (( lo>hi )) && { lo=$brow; hi=$arow; };  for ((r=lo; r<=hi; r++)); do lay "$r" "$bcol"; done
+    l1=$(( bcol>acol ? bcol-acol : acol-bcol )); l2=$(( brow>arow ? brow-arow : arow-brow ))
+    MINLEG=$(( l1<l2 ? l1+1 : l2+1 ))
+    (( CHKHUG )) && { hseg "$arow" "$acol" "$bcol"; vseg "$bcol" "$arow" "$brow"; }
+  elif (( rowsdis )); then              # STACKED (columns overlap) -> straight vertical if doors align, else a Z
+    cl=$(( axl+hia )); (( bxl+hib>cl )) && cl=$(( bxl+hib ));  ch=$(( axr-hia )); (( bxr-hib<ch )) && ch=$(( bxr-hib ))
+    if (( cl<=ch )); then col=$(( (cl+ch)/2 ))
+      if (( ayb<byt )); then for ((r=ayb+1; r<byt; r++)); do lay "$r" "$col"; done; (( CHKHUG )) && vseg "$col" "$((ayb+1))" "$((byt-1))"
+      else for ((r=byb+1; r<ayt; r++)); do lay "$r" "$col"; done; (( CHKHUG )) && vseg "$col" "$((byb+1))" "$((ayt-1))"; fi
+    else                                # doors offset -> Z: vertical stub, horizontal jog, vertical stub (all legs >=3)
+      if (( ayb<byt )); then t=$a; u=$b; else t=$b; u=$a; fi   # t = upper room, u = lower
+      mwt=$(( ROOMw[t]>=5?2:1 )); mwu=$(( ROOMw[u]>=5?2:1 ))   # door >=2 from corners on >=5-wide rooms, >=1 on small ones
+      tlo=$(( ROOMx[t]+mwt )); thi=$(( ROOMx[t]+ROOMw[t]-1-mwt )); (( thi<tlo )) && thi=$tlo
+      ulo=$(( ROOMx[u]+mwu )); uhi=$(( ROOMx[u]+ROOMw[u]-1-mwu )); (( uhi<ulo )) && uhi=$ulo
+      if (( ulo+uhi >= tlo+thi )); then dA=$tlo; dB=$uhi; else dA=$thi; dB=$ulo; fi   # spread doors -> longest jog
+      wt=$(( ROOMy[t]+ROOMh[t] )); wb=$(( ROOMy[u]-1 ))
+      m=2; (( wb-wt<4 )) && m=1                                  # keep both vertical stubs >=3 (>=2 only if gap too small)
+      tr=$(( (wt+wb)/2 )); (( tr<wt+m )) && tr=$(( wt+m )); (( tr>wb-m )) && tr=$(( wb-m ))
+      for ((r=wt; r<=tr; r++)); do lay "$r" "$dA"; done
+      lo=$dA; hi=$dB; (( lo>hi )) && { lo=$dB; hi=$dA; };  for ((c=lo; c<=hi; c++)); do lay "$tr" "$c"; done
+      for ((r=tr; r<=wb; r++)); do lay "$r" "$dB"; done
+      l1=$(( tr-wt+1 )); l2=$(( wb-tr+1 )); lj=$(( (dA>dB?dA-dB:dB-dA)+1 )); JOG=$lj
+      MINLEG=$l1; (( l2<MINLEG )) && MINLEG=$l2; (( lj<MINLEG )) && MINLEG=$lj
+      (( CHKHUG )) && { vseg "$dA" "$wt" "$tr"; vseg "$dB" "$tr" "$wb"; hseg "$tr" "$dA" "$dB"; }
+    fi
+  elif (( colsdis )); then              # SIDE BY SIDE (rows overlap) -> straight horizontal if doors align, else a Z
+    rl=$(( ayt+via )); (( byt+vib>rl )) && rl=$(( byt+vib ));  rh=$(( ayb-via )); (( byb-vib<rh )) && rh=$(( byb-vib ))
+    if (( rl<=rh )); then row=$(( (rl+rh)/2 ))
+      if (( axr<bxl )); then for ((c=axr+1; c<bxl; c++)); do lay "$row" "$c"; done; (( CHKHUG )) && hseg "$row" "$((axr+1))" "$((bxl-1))"
+      else for ((c=bxr+1; c<axl; c++)); do lay "$row" "$c"; done; (( CHKHUG )) && hseg "$row" "$((bxr+1))" "$((axl-1))"; fi
+    else                                # doors offset -> Z: horizontal stub, vertical jog, horizontal stub (all legs >=3)
+      if (( axr<bxl )); then t=$a; u=$b; else t=$b; u=$a; fi   # t = left room, u = right
+      mht=$(( ROOMh[t]>=5?2:1 )); mhu=$(( ROOMh[u]>=5?2:1 ))   # door >=2 from corners on >=5-tall rooms, >=1 on small ones
+      tlo=$(( ROOMy[t]+mht )); thi=$(( ROOMy[t]+ROOMh[t]-1-mht )); (( thi<tlo )) && thi=$tlo
+      ulo=$(( ROOMy[u]+mhu )); uhi=$(( ROOMy[u]+ROOMh[u]-1-mhu )); (( uhi<ulo )) && uhi=$ulo
+      if (( ulo+uhi >= tlo+thi )); then dA=$tlo; dB=$uhi; else dA=$thi; dB=$ulo; fi
+      wt=$(( ROOMx[t]+ROOMw[t] )); wb=$(( ROOMx[u]-1 ))
+      m=2; (( wb-wt<4 )) && m=1
+      tc=$(( (wt+wb)/2 )); (( tc<wt+m )) && tc=$(( wt+m )); (( tc>wb-m )) && tc=$(( wb-m ))
+      for ((c=wt; c<=tc; c++)); do lay "$dA" "$c"; done
+      lo=$dA; hi=$dB; (( lo>hi )) && { lo=$dB; hi=$dA; };  for ((r=lo; r<=hi; r++)); do lay "$r" "$tc"; done
+      for ((c=tc; c<=wb; c++)); do lay "$dB" "$c"; done
+      l1=$(( tc-wt+1 )); l2=$(( wb-tc+1 )); lj=$(( (dA>dB?dA-dB:dB-dA)+1 )); JOG=$lj
+      MINLEG=$l1; (( l2<MINLEG )) && MINLEG=$l2; (( lj<MINLEG )) && MINLEG=$lj
+      (( CHKHUG )) && { hseg "$dA" "$wt" "$tc"; hseg "$dB" "$tc" "$wb"; vseg "$tc" "$dA" "$dB"; }
+    fi
+  fi
+  if (( CHECKMODE )); then
+    (( CHKLEG && (MINLEG<3 || JOG<JOGMIN) )) && BLOCKED=1   # reject short turn-leg AND short Z-jog (<2 tiles between corners)
+    (( CHKHUG && HUG )) && BLOCKED=1         # reject a Z whose jog runs within CLR of (hugs) a room wall
+  else
+    SIDE_USED[a*4+SIDEA]=1; SIDE_USED[b*4+SIDEB]=1
+  fi
+}
+
+# One connect sweep over all edges (nearest-first), joining still-split components under a given rule set.
+# $1=CHKCORR (>=2 walls from other halls) $2=CHKSIDE (<=1 hall per room side) $3=CHKLEG (turn-legs >=3).
+# Relies on bash dynamic scope to see generate()'s UF/ORD/EA/EB.
+connect_pass() {
+  local oi a b ra rb
+  for oi in "${ORD[@]}"; do
+    a=${EA[oi]}; b=${EB[oi]}
+    ra=$a; while (( UF[ra]!=ra )); do UF[ra]=${UF[UF[ra]]}; ra=${UF[ra]}; done
+    rb=$b; while (( UF[rb]!=rb )); do UF[rb]=${UF[UF[rb]]}; rb=${UF[rb]}; done
+    (( ra==rb )) && continue
+    CHECKMODE=1; CHKCORR=$1; CHKSIDE=$2; CHKLEG=$3; CHKHUG=$4; CHKLEN=$5; BLOCKED=0; connect "$a" "$b"
+    CHECKMODE=0; CHKCORR=0; CHKSIDE=0; CHKLEG=0; CHKHUG=0; CHKLEN=0
+    (( BLOCKED )) && continue
+    connect "$a" "$b"; UF[ra]=$rb
+  done
+}
+
+# obj_ok r c — may an OBJECT (stair / gold / star / key) sit at (r,c)? Yes iff (r,c) is plain floor `·`,
+# is not the player/start cell, and EVERY one of its 8 neighbours is plain floor too — i.e. no wall `#`,
+# no map edge, no other object glyph (`> < $ ✱ ⚷`), and not the start cell where the `<` up-stair lands.
+# That single test enforces BOTH placement rules at once: a 1-tile gap from walls AND a 1-tile gap from
+# every other object. (Doors are floor, but a wall-gapped cell is in the inner interior, clear of them.)
+obj_ok() {
+  local r=$1 c=$2 rr cc
+  [[ ${TILE[r*W+c]:-#} == '·' ]] || return 1
+  (( r==pr && c==pc )) && return 1
+  for ((rr=r-1; rr<=r+1; rr++)); do
+    (( rr<0 || rr>=H )) && return 1
+    for ((cc=c-1; cc<=c+1; cc++)); do
+      (( cc<0 || cc>=W )) && return 1
+      (( rr==r && cc==c )) && continue
+      (( rr==pr && cc==pc )) && return 1
+      [[ ${TILE[rr*W+cc]} == '·' ]] || return 1
+    done
+  done
+  return 0
+}
+
+# Persistent caches — declared early (associative) so any harness/sim that sources only the functions above the
+# main loop (and generate()'s plan_this_floor) gets proper "realm,floor"/"realm,seg" string-key semantics. With
+# a default INDEXED array a "1,0" subscript would be arithmetic-evaluated (comma operator -> 0) and collide.
+declare -A WSEED WFOG WGOLD WSEEN WSTAR WDEPTH WPLAN WOBJSEEN WFGOLD WTOLLPAID WHASMON WHALLELIG   # per-floor "realm,floor" (WFGOLD=gold value placed; WTOLLPAID=toll paid; WHASMON=this hall has a monitor)
+declare -A RSEGS RTGT RLASTF WSEGGOT WSEGKEY WSEGLO WSEGHI REMPTY RB2B RLASTHALL   # per-realm/seg "realm,seg"; REMPTY=per-boundary empty counts; RB2B=had a back-to-back; RLASTHALL=last boundary had a hall (no-drought carry)
+declare -A PVIS   # cells walked in the CURRENT scoring phase, keyed "realm,floor,cell" (reset each phase boundary)
+
+# --- realm / segment planning ------------------------------------------------
+# A realm is a CHAIN of star-gated SEGMENTS separated by boss floors (and the odd empty pass-through). The
+# realm shape — how many segments, each segment's star target — is a pure deterministic function of the realm
+# INDEX (its own little LCG seeded from the index), so it's identical across resize / revisits / sessions and
+# touches NONE of $RANDOM (which `generate` owns for the layout). Also decides where empty floors sit (REMPTY,
+# guaranteeing >=1 per realm). Cached in RSEGS/RTGT/REMPTY once computed.
+realm_plan() {
+  local R=$1
+  [[ -n ${RSEGS[$R]:-} ]] && return
+  (( R>0 )) && realm_plan $((R-1))          # plan the previous realm first so its back-to-back flag (RB2B) is known
+  local s=$(( ((R+1)*2654435761) & 0x7fffffff )) roll segs i tg tgts=""
+  s=$(( (s*1103515245 + 12345) & 0x7fffffff )); roll=$(( (s>>16)%10 ))   # 2:30% / 3:50% / 4:20% (weighted to 3)
+  if   (( roll<3 )); then segs=2
+  elif (( roll<8 )); then segs=3
+  else                    segs=4; fi
+  for ((i=0; i<segs; i++)); do                                            # per-segment star target 3-10, balanced bell centered on 6-7
+    s=$(( (s*1103515245 + 12345) & 0x7fffffff )); roll=$(( (s>>16)%100 ))
+    if   (( roll<9  )); then tg=3      # 9%
+    elif (( roll<20 )); then tg=4      # 11%
+    elif (( roll<33 )); then tg=5      # 13%
+    elif (( roll<48 )); then tg=6      # 15%
+    elif (( roll<63 )); then tg=7      # 15%
+    elif (( roll<76 )); then tg=8      # 13%
+    elif (( roll<88 )); then tg=9      # 12%
+    else                     tg=10; fi # 12%
+    tgts+="$tg "
+  done
+  RSEGS[$R]=$segs; RTGT[$R]=${tgts% }
+  # Empty floors. Each of the segs-1 boundaries first rolls 0 or 1 empty (EMPTY1_PCT). Then AT MOST ONE
+  # back-to-back pair per realm: a random "want" roll (B2B_PCT) bumps one random boundary to 2 empties, but
+  # ONLY if the previous realm had none (no two doubles in a row). To stop long droughts, it's also FORCED if
+  # the previous TWO realms both had none -- so no 3-realm window is ever without a back-to-back. RB2B[$R]
+  # records it for the next realms. Finally guarantee >=1 empty (force a single empty if every boundary rolled 0).
+  local nbound=$(( segs-1 )) b emps="" tot=0 want=0 force=0 prevb2b=${RB2B[$((R-1))]:-0} prev2b2b=${RB2B[$((R-2))]:-0}; local -a ea=()
+  local prevhall=${RLASTHALL[$((R-1))]:-1}                # did the previous realm's LAST boundary get a hall? (carry the no-drought streak across realms; 1 at the start so realm 0's first isn't forced)
+  for ((b=0; b<nbound; b++)); do
+    s=$(( (s*1103515245 + 12345) & 0x7fffffff )); roll=$(( (s>>16)%100 ))
+    (( roll<EMPTY1_PCT )) && ea[b]=1 || ea[b]=0
+    (( ea[b]==0 && prevhall==0 )) && ea[b]=1             # NEVER two segment-boundaries in a row without a hall -> a hall at least every OTHER segment
+    prevhall=$(( ea[b]>=1 ? 1 : 0 ))
+  done
+  s=$(( (s*1103515245 + 12345) & 0x7fffffff )); (( (s>>16)%100 < B2B_PCT )) && want=1
+  (( R>=2 && ! prevb2b && ! prev2b2b )) && force=1        # two dry realms in a row -> guarantee one here (every 3-realm window has a back-to-back)
+  if (( (want || force) && ! prevb2b && nbound>0 )); then # grant this realm its single back-to-back pair
+    s=$(( (s*1103515245 + 12345) & 0x7fffffff )); b=$(( (s>>16)%nbound )); ea[b]=2; RB2B[$R]=1
+  else
+    RB2B[$R]=0
+  fi
+  for ((b=0; b<nbound; b++)); do tot=$(( tot+ea[b] )); done
+  if (( tot==0 && nbound>0 )); then                       # guarantee one single empty floor somewhere in the realm
+    s=$(( (s*1103515245 + 12345) & 0x7fffffff )); b=$(( (s>>16)%nbound )); ea[b]=1
+  fi
+  for ((b=0; b<nbound; b++)); do emps+="${ea[b]} "; done
+  REMPTY[$R]=${emps% }
+  RLASTHALL[$R]=$(( nbound>0 && ea[nbound-1]>=1 ? 1 : 0 ))  # carry into the next realm so the seam can't make two hall-less boundaries in a row
+}
+
+# Decide THIS floor's role within its realm: which segment it belongs to, how many stars to seed here, whether
+# it's the segment's BOSS (the floor whose stars complete the target -> locked `>`), or an EMPTY pass-through.
+# Called from `generate` once NROOMS is known. It reads the floor ABOVE's plan (WPLAN, cross-floor state) and
+# the realm's precomputed empty-floor counts (REMPTY) to decide this floor's role; it rolls only the subset
+# size from $RANDOM (the mapseed stream) — ALWAYS, cache or not, so the stream advances identically on every
+# regeneration and a revisited floor reproduces exactly. (Empty placement is deterministic, off $RANDOM.)
+plan_this_floor() {
+  local R=${CUR_REALM:-0} F=${CUR_FLOOR:-0} key
+  key="$R,$F"; realm_plan "$R"; IS_FIRST_HALL=0   # set to 1 below only for the first hall of a boundary (toll-eligible)
+  local -a tg=(${RTGT[$R]}) emp_b=(${REMPTY[$R]}); local nsegs=${RSEGS[$R]}
+  local seg accum place=0 boss=0 empty=0 erun=0 avail=$(( NROOMS-1 )) tgt rem sub lo
+  # Room 0 is the arrival / up-stairs room. It's star-ELIGIBLE on every floor EXCEPT the game's very first
+  # (realm 0 / floor 0 — the only floor with no up-stairs), where a star would be a no-explore freebie. So
+  # only that one floor reserves room 0 (avail = rooms-1); every deeper arrival room can hold a star too
+  # (avail = rooms). A lone-room floor (NROOMS==1) still seeds none (the deliberate rare breather).
+  (( (R!=0 || F!=0) && NROOMS>=2 )) && avail=$NROOMS
+  if (( F==0 )); then
+    seg=0; accum=0                                              # a realm always opens on a REAL (non-empty) floor
+  else
+    local pseg paccum pplace pboss pempty perun
+    read -r pseg paccum pplace pboss pempty perun <<< "${WPLAN[$R,$((F-1))]:-0 0 0 0 0 0}"
+    if   (( perun>0 )); then                                   # inside an empty RUN the boss above queued (1 or 2 floors)
+      empty=1; accum=0; erun=$(( perun-1 ))                    # this floor is empty; carry the rest of the run
+      seg=$(( pempty ? pseg : pseg+1 ))                        # 1st empty advances to the next segment; a 2nd stays put
+      (( ! pempty )) && IS_FIRST_HALL=1                        # the FIRST hall of a boundary (prev was the boss) -> the toll-eligible one
+    elif (( pboss )); then seg=$(( pseg+1 )); accum=0          # boss with no empties after -> next segment's first floor
+    elif (( pempty )); then seg=$pseg; accum=0                 # first star-floor after the empty run
+    else seg=$pseg; accum=$(( paccum+pplace )); fi             # same segment: carry its running star total down
+  fi
+  (( seg>nsegs-1 )) && seg=$(( nsegs-1 ))                       # safety clamp
+  tgt=${tg[$seg]}
+  if (( ! empty && avail>0 )); then
+    rem=$(( tgt-accum )); (( rem<1 )) && rem=1
+    lo=$(( (avail+1)/2 )); (( lo<1 )) && lo=1                   # seed at least half the rooms -> big windows finish fast
+    sub=$(( lo + RANDOM%(avail-lo+1) ))                         # a random subset of this floor's star-eligible rooms
+    place=$(( sub<rem ? sub : rem ))                            # never overshoot the segment target
+    (( accum+place>=tgt )) && boss=1                            # the floor that completes the target IS the boss
+  fi
+  (( boss && seg<nsegs-1 )) && erun=${emp_b[$seg]:-0}          # non-final boss: queue this boundary's 0/1/2 empty floors (from realm_plan)
+  WPLAN[$key]="$seg $accum $place $boss $empty $erun"
+  if (( ! empty )); then                                          # track the segment's STAR-floor range (for random key placement)
+    local sk="$R,$seg"
+    [[ -z ${WSEGLO[$sk]:-} ]] || (( F<WSEGLO[$sk] )) && WSEGLO[$sk]=$F
+    [[ -z ${WSEGHI[$sk]:-} ]] || (( F>WSEGHI[$sk] )) && WSEGHI[$sk]=$F
+  fi
+  SEG_IDX=$seg; SEG_TGT=$tgt; IS_BOSS=$boss; IS_EMPTY=$empty; STARS_HERE=$place
+}
+
+# Cheap peek (no $RANDOM, no NROOMS) at whether THIS floor is an empty pass-through, so `generate` can pick the
+# layout BEFORE the room scatter. Mirrors plan_this_floor's empty test: F==0 is never empty; otherwise this
+# floor is empty iff the floor above queued an empty run (perun>0 in its WPLAN entry).
+floor_is_empty() {
+  local R=${CUR_REALM:-0} F=${CUR_FLOOR:-0} pseg paccum pplace pboss pempty perun
+  (( F==0 )) && return 1
+  read -r pseg paccum pplace pboss pempty perun <<< "${WPLAN[$R,$((F-1))]:-0 0 0 0 0 0}"
+  (( perun>0 ))
+}
+
+# Build an EMPTY floor as a NES-Metroid-style transition HALL: one straight 1-tall horizontal corridor-room of
+# RANDOM length at a RANDOM spot in the window, the up-stair `<` at the LEFT end (where you arrive) and the
+# down-stair `>` at the RIGHT end. You walk straight across and descend — a pure breather, no stars, no gold.
+# The length/position are rolled from $RANDOM (seeded from this floor's mapseed just above), so the hall is
+# deterministic per floor and reproduces on revisit. `<` itself is placed by load_floor at STARTR/STARTC; here
+# we set those (left end), the `>` (right end), and the single ROOM[0].
+build_hallway() {
+  local i r c hr hh y0 y1 x0 x1 maxw minw hw
+  TILE=(); DISC=(); OBJSEEN=(); ROOMx=(); ROOMy=(); ROOMw=(); ROOMh=(); ROOMSEEN=(); NEARROOM=(); ISJUNC=(); DEAD=(); roomsseen=0
+  OCC=(); CORR=(); SIDE_USED=()
+  for ((i=0; i<W*H; i++)); do TILE[i]='#'; DISC[i]=0; OBJSEEN[i]=0; done
+  # 1-tile-tall corridor (same height as a hallway) at a RANDOM length and a RANDOM spot in the window. $RANDOM
+  # here is seeded from mapseed (set just above), so the hall is deterministic per floor and reproduces on a
+  # revisit; black space fills the rest of the window.
+  hh=1
+  maxw=$(( W-4 )); (( maxw<6 )) && maxw=$(( W-2 ))              # longest hall (leaves a wall margin); floor never narrower than 6
+  (( maxw>HALL_MAXLEN )) && maxw=$HALL_MAXLEN                   # cap length so wide windows don't get a full-width hall
+  minw=$(( maxw*4/10 )); (( minw<6 )) && minw=6; (( minw>maxw )) && minw=$maxw
+  hw=$(( minw + RANDOM%(maxw-minw+1) ))                         # hall length (random, ~40-100% of the width)
+  x0=$(( 1 + RANDOM%(W-1-hw) )); x1=$(( x0+hw-1 ))             # random horizontal position (>=1 wall col each side)
+  y0=$(( 1 + RANDOM%(H-2) )); y1=$y0                            # random row (1-tall; wall row above & below)
+  for ((r=y0; r<=y1; r++)); do for ((c=x0; c<=x1; c++)); do TILE[r*W+c]='·'; done; done
+  for ((r=y0-1; r<=y1+1; r++)); do for ((c=x0-1; c<=x1+1; c++)); do (( r>=0&&r<H&&c>=0&&c<W )) && NEARROOM[r*W+c]=1; done; done
+  ROOMx[0]=$x0; ROOMy[0]=$y0; ROOMw[0]=$(( x1-x0+1 )); ROOMh[0]=$hh; ISJUNC[0]=0; DEAD[0]=0
+  NROOMS=1; NNODES=1
+  hr=$(( (y0+y1)/2 ))                                           # middle row carries both stairs
+  STARTR=$hr; STARTC=$(( x0+1 ))                                # arrival / up-stair `<` end (left)
+  STAIRR=$hr; STAIRC=$(( x1-1 ))                                # down-stair `>` end (right)
+  pr=$STARTR; pc=$STARTC
+  TILE[STAIRR*W+STAIRC]='>'
+  cur_room=-1
+}
+
+# compute_toll -> REPLY = the hall monitor's fee = TOLL_FRAC% of ALL the gold VALUE dropped since the PREVIOUS
+# tolled hall (not just the last segment). Walks UP the floor chain from this hall, summing each floor's cached
+# total (WFGOLD), and stops at the nearest floor that itself had a monitor (WHASMON) — that toll already charged
+# for everything above it. Crosses realm boundaries via RLASTF. Gold values are fixed at placement, so it's
+# deterministic; you must have collected ~that share of the whole stretch's gold to afford it.
+compute_toll() {
+  local cr=$CUR_REALM cf=$CUR_FLOOR sum=0
+  while :; do
+    if   (( cf>0 )); then cf=$(( cf-1 ))                          # step up one floor...
+    elif (( cr>0 )); then cr=$(( cr-1 )); cf=${RLASTF[$cr]:-0}    # ...or into the previous realm's last floor
+    else break; fi                                               # reached the top of the world
+    [[ -n ${WHASMON[$cr,$cf]:-} ]] && break                      # previous tolled hall -> its toll covered the gold above it
+    sum=$(( sum + ${WFGOLD[$cr,$cf]:-0} ))
+  done
+  REPLY=$(( sum * TOLL_FRAC / 100 ))
+}
+
+# place_monitor: on the FIRST hall of a boundary that's long enough and has gold to charge for ("eligible"),
+# maybe spawn the `&` hall monitor. Normally a TOLL_PCT roll, but FORCED if the previous two eligible halls
+# both had no monitor -- so you never pass 3 eligible halls in a row without one. He's a PERMANENT fixture
+# (placed whether or not the toll is already paid) -- once paid the hero hops over him (try_move); WTOLLPAID,
+# not his presence, tracks payment. WHALLELIG marks eligible halls, WHASMON marks the staffed ones (also a
+# toll boundary for compute_toll). Deterministic per floor.
+place_monitor() {
+  TOLLON=0; TOLLR=-1; TOLLC=-1; TOLLAMT=0
+  (( IS_FIRST_HALL )) || return
+  local lo=$(( STARTC+4 )) hi=$(( STAIRC-4 ))                    # keep a 3-dot gap from each stair (up `<` at STARTC, down `>` at STAIRC): cells ±1..±3 stay clear, he patrols [lo,hi]
+  (( lo>hi )) && return                                          # hall too short to fit the gap + the monitor -> no toll here
+  compute_toll; (( REPLY<1 )) && return                          # no gold dropped since the last toll -> nothing to charge -> not eligible
+  WHALLELIG[$CUR_REALM,$CUR_FLOOR]=1                             # this hall COULD host a monitor
+  local cr=$CUR_REALM cf=$CUR_FLOOR streak=0                     # count prior consecutive eligible halls with no monitor
+  while (( streak<2 )); do
+    if   (( cf>0 )); then cf=$(( cf-1 ))
+    elif (( cr>0 )); then cr=$(( cr-1 )); cf=${RLASTF[$cr]:-0}
+    else break; fi
+    [[ -n ${WHALLELIG[$cr,$cf]:-} ]] || continue                 # ignore non-eligible-hall floors
+    [[ -n ${WHASMON[$cr,$cf]:-} ]] && break                      # a prior eligible hall had a monitor -> streak ends
+    streak=$(( streak+1 ))
+  done
+  local place=0
+  (( streak>=2 )) && place=1                                     # two dry eligible halls behind us -> FORCE one here (never 3 without a monitor)
+  (( ! place )) && (( RANDOM%100 < TOLL_PCT )) && place=1        # otherwise the usual random staffing
+  (( place )) || return
+  local mc=$(( (STARTC+STAIRC)/2 )); (( mc<lo )) && mc=$lo; (( mc>hi )) && mc=$hi
+  TOLLAMT=$REPLY; TOLLR=$STAIRR; TOLLC=$mc; TOLLON=1; TOLL_LO=$lo; TOLL_HI=$hi; TOLL_DIR=1   # he PACES within [lo,hi], starting centre, moving right (pace_monitor)
+  WHASMON[$CUR_REALM,$CUR_FLOOR]=1                                # staffed -> also a toll boundary so the NEXT toll stops summing here
+  TILE[TOLLR*W+TOLLC]='&'
+}
+
+# Build a level: SCATTER rooms at random positions (rejection-sampled so none come within GAP of each
+# other), then join them with a minimum spanning tree over room centres + a few short extra edges (loops).
+# Organic, non-grid layout — rooms rarely line up on any axis.
+generate() {
+  local i j r c rw rh px py k tries ngold ok nr e ne oi a b ra rb si dd idx gy gx gidx sp fgold gv near dgx dgy
+  local rminw rminh rmaxw rmaxh GAPH GAPV CLR cap target far fard attempt MAXTRY ncomp rootr
+  local ti wl wh hl hh hg NBIG; local -a B_WLO B_WHI B_HLO B_HHI
+  local fy0 fx0 fy1 fx1 scy scx sbest sr sc sbestok srok scok; local -a badrow badcol
+  local -a CX CY UF EA EB ED ORD rord
+  # This floor's SEED: RANDOM is reseeded from it, so (mapseed, W, H) fully determines the layout. The seed
+  # is shown in the `m` stats overlay; set RT_SEED=<n> in the environment to reproduce a reported floor.
+  mapseed=$(( RANDOM*32768 + RANDOM ))
+  [[ -n "${RT_SEED:-}" ]] && { mapseed=$RT_SEED; unset RT_SEED; }
+  BOXMAP=()                                                   # invalidate the per-floor box-wall glyph cache (walls are static within a floor)
+  RANDOM=$mapseed
+  to_b36 $(( (mapseed<<20) | (W<<10) | H )); seedhash=$REPLY   # one shareable code packing mapseed + W + H
+  GOLDVAL=()                                                  # per-cell gold VALUE (fixed at placement, not pickup)
+  # EMPTY floor -> a straight transition HALL instead of the room scatter (Metroid in-between corridor). Decide
+  # this BEFORE scattering; plan_this_floor still runs (for SEG/IS_EMPTY/WPLAN bookkeeping; STARS_HERE stays 0).
+  # A hall holds no gold (WFGOLD=0) but may host a toll-collecting hall monitor `&` (place_monitor).
+  if floor_is_empty; then build_hallway; plan_this_floor; WFGOLD[$CUR_REALM,$CUR_FLOOR]=0; place_monitor; cur_room=-1; reveal; return; fi
+  rminw=5; rminh=5                   # min room dims; doors sit >=2 from corners at >=5, >=1 at 3-4 (cramped only)
+  GAPH=9; GAPV=9; CLR=3; HUGCLR=4    # 9-tile spacing + reject any corridor running parallel within 4 tiles of a room
+  (( H<13 )) && { GAPV=3; HUGCLR=2; rminh=3; } # SHORT window: rooms ~3 rows apart AND allow 3-4 tall rooms so they scatter high/low
+  (( W<30 )) && { GAPH=3; HUGCLR=2; rminw=3; } # NARROW window: same on the horizontal axis (3-4 wide rooms allowed)
+  if (( W<30 || H<13 )); then rmaxw=$(( W/2-1 )); rmaxh=$(( H/2-1 ))   # cramped windows: smaller rooms
+  else rmaxw=10; rmaxh=8; fi
+  (( rmaxw>10 )) && rmaxw=10; (( rmaxw<5 )) && rmaxw=5; (( rmaxw<rminw )) && rmaxw=$rminw   # keep <=5-wide rooms reachable for variety
+  (( rmaxh>8 )) && rmaxh=8; (( rmaxh<5 )) && rmaxh=5; (( rmaxh<rminh )) && rmaxh=$rminh     # so cramped rooms span the full 3..5 range
+  cap=$(( W*H/210 )); (( cap<4 )) && cap=4; (( cap>7 )) && cap=7   # window CAPACITY (max rooms): sparse => clean halls
+  MAXTRY=40
+  if (( H<13 || W<30 )); then           # cramped window: fewer rooms so a fully-CLEAN scatter is findable,
+    cap=$(( W>H ? W/30 : H/30 ))        # and more retries to find it (keeps rooms scattered, never a rigid band)
+    (( cap<3 )) && cap=3; (( cap>5 )) && cap=5
+    MAXTRY=28
+  fi
+  # Per-floor room count fluctuates instead of always maxing the capacity. A triangular bell over [2, cap]
+  # (average of two rolls) makes the MIDDLE count most likely and tapers toward both ends; a rare extra roll
+  # drops it to a lone room. So both 1 and cap are low-probability and most floors land mid — large windows
+  # range the full 1–7 with a ~4–5 peak, while small windows (cap 3) stay a sane 2–3 instead of collapsing to 1.
+  target=$(( 2 + (RANDOM%(cap-1) + RANDOM%(cap-1))/2 ))
+  (( RANDOM%100<4 )) && target=1
+  # Big-chamber tiers (wlo whi hlo hhi hgate): keep only those that FIT this window. Square chambers
+  # (subtle/medium/grand) must stay <=half the window on BOTH axes so they never starve the floor; the wide
+  # HALL is gated on WIDTH only (<=half wide, so other rooms still fit beside it) and just has to physically
+  # fit in height -- so even a SHORT window can host a grand-but-wide chamber. One fitting tier is picked at
+  # random per big roll (so short windows reliably get halls, tall windows mix all four).
+  B_WLO=(); B_WHI=(); B_HLO=(); B_HHI=()
+  for ti in 0 1 2 3; do
+    case $ti in
+      0) wl=11 wh=13 hl=9 hh=9  hg=1 ;;   # subtle   ~11-13 x 9
+      1) wl=11 wh=16 hl=9 hh=11 hg=1 ;;   # medium   ~11-16 x 9-11
+      2) wl=11 wh=20 hl=9 hh=13 hg=1 ;;   # grand    ~11-20 x 9-13
+      3) wl=14 wh=24 hl=3 hh=5  hg=0 ;;   # hall     ~14-24 x 3-5  (wide+short: a grand room even in a short window)
+    esac
+    (( W>=2*wh )) || continue                          # never wider than half the window
+    (( hg && H<2*hh )) && continue                     # square tiers also stay <=half tall
+    (( H>=hl+2 )) || continue                          # must physically fit (room + walls) in height
+    B_WLO+=($wl); B_WHI+=($wh); B_HLO+=($hl); B_HHI+=($hh)
+  done
+  NBIG=${#B_WLO[@]}
+  JOGMIN=4; (( H<13 || W<30 )) && JOGMIN=3
+  ncomp=0
+  # RETRY-UNTIL-CLEAN: scatter a fresh layout and connect it with the STRICT pass only. If that single pass
+  # joins every room into one piece, the map is provably clean (no stacking / double-wide / short legs /
+  # crossings, since only clean corridors were ever carved). If it leaves the rooms split, throw the whole
+  # layout away and re-scatter. Almost every map you see is a first- or second-try clean one.
+  for ((attempt=1; attempt<=MAXTRY; attempt++)); do
+    TILE=(); DISC=(); OBJSEEN=(); ROOMx=(); ROOMy=(); ROOMw=(); ROOMh=(); ROOMSEEN=(); NEARROOM=(); ISJUNC=(); DEAD=(); roomsseen=0
+    OCC=(); CORR=(); SIDE_USED=(); CX=(); CY=(); EA=(); EB=(); ED=(); ORD=(); UF=()
+    CHECKMODE=0; CHKCORR=0; CHKSIDE=0; CHKLEG=0; CHKHUG=0; CHKLEN=0
+    for ((i=0; i<W*H; i++)); do TILE[i]='#'; DISC[i]=0; OBJSEEN[i]=0; done
+    # SCATTER rooms by rejection sampling (positions only): reject any rect within GAP of a placed room.
+    nr=0
+    for ((tries=0; tries<target*60 && nr<target; tries++)); do
+      rw=0                                                  # 0 = "not a big room yet"
+      if (( NBIG>0 && RANDOM%100<20 )); then                # 20%: a BIG chamber -> pick one of the window's FITTING tiers
+        k=$(( RANDOM%NBIG ))
+        rw=$(( B_WLO[k] + RANDOM%(B_WHI[k]-B_WLO[k]+1) )); rh=$(( B_HLO[k] + RANDOM%(B_HHI[k]-B_HLO[k]+1) ))
+      fi
+      (( rw==0 )) && { rw=$(( rminw + RANDOM%(rmaxw-rminw+1) )); rh=$(( rminh + RANDOM%(rmaxh-rminh+1) )); }
+      (( W-rw-1<1 || H-rh-1<1 )) && continue              # off-by-one fix: room wall may sit on the map border row/col
+      px=$(( 1 + RANDOM%(W-rw-1) )); py=$(( 1 + RANDOM%(H-rh-1) ))
+      ok=1; near=0
+      for ((j=0; j<nr; j++)); do
+        (( px+rw+GAPH<=ROOMx[j] || ROOMx[j]+ROOMw[j]+GAPH<=px || py+rh+GAPV<=ROOMy[j] || ROOMy[j]+ROOMh[j]+GAPV<=py )) || { ok=0; break; }
+        # CLUSTER: is this room within a CORR_MAXLEN corridor of room j? (wall-gap sum dgx+dgy) -> a short-corridor spanning tree stays possible
+        dgx=0; (( px+rw<=ROOMx[j] )) && dgx=$(( ROOMx[j]-(px+rw) )); (( ROOMx[j]+ROOMw[j]<=px )) && dgx=$(( px-(ROOMx[j]+ROOMw[j]) ))
+        dgy=0; (( py+rh<=ROOMy[j] )) && dgy=$(( ROOMy[j]-(py+rh) )); (( ROOMy[j]+ROOMh[j]<=py )) && dgy=$(( py-(ROOMy[j]+ROOMh[j]) ))
+        (( dgx+dgy<=CORR_MAXLEN )) && near=1
+      done
+      (( ok )) || continue
+      (( nr>0 && ! near )) && continue                     # too far from every placed room -> would need a >CORR_MAXLEN corridor; reject
+      ROOMx[nr]=$px; ROOMy[nr]=$py; ROOMw[nr]=$rw; ROOMh[nr]=$rh; ISJUNC[nr]=0; DEAD[nr]=0
+      CX[nr]=$(( px+rw/2 )); CY[nr]=$(( py+rh/2 )); nr=$(( nr+1 ))
+    done
+    while (( nr<1 )); do      # safety: a floor needs at least the player's room (1-room floors are an allowed rare roll)
+      rw=$rminw; rh=$rminh; (( rw>W-2 )) && rw=$(( W-2 )); (( rh>H-2 )) && rh=$(( H-2 ))
+      px=1; py=1
+      (( px<1 )) && px=1; (( py<1 )) && py=1
+      ROOMx[nr]=$px; ROOMy[nr]=$py; ROOMw[nr]=$rw; ROOMh[nr]=$rh; ISJUNC[nr]=0; DEAD[nr]=0
+      CX[nr]=$(( px+rw/2 )); CY[nr]=$(( py+rh/2 )); nr=$(( nr+1 ))
+    done
+    NNODES=$nr; NROOMS=$nr
+    # OCC = every room interior + a CLR-tile clearance ring (corridors of OTHER rooms stay out of it).
+    for ((i=0; i<nr; i++)); do
+      px=${ROOMx[i]}; py=${ROOMy[i]}; rw=${ROOMw[i]}; rh=${ROOMh[i]}
+      for ((r=py-CLR; r<=py+rh-1+CLR; r++)); do for ((c=px-CLR; c<=px+rw-1+CLR; c++)); do (( r>=0&&r<H&&c>=0&&c<W )) && OCC[r*W+c]=$i; done; done
+    done
+    # Candidate edges = all room pairs, weighted by squared centre distance; sort ascending (nearest first).
+    ne=0
+    for ((i=0; i<nr; i++)); do for ((j=i+1; j<nr; j++)); do
+      EA[ne]=$i; EB[ne]=$j; ED[ne]=$(( (CX[i]-CX[j])*(CX[i]-CX[j]) + (CY[i]-CY[j])*(CY[i]-CY[j]) )); ne=$(( ne+1 ))
+    done; done
+    ORD=( $(for ((e=0; e<ne; e++)); do printf '%s %s\n' "${ED[e]}" "$e"; done | sort -n | awk '{print $2}') )
+    # Carve rooms FIRST (+ NEARROOM wall-ring for the flashlight); corridors carved into the gaps after.
+    for ((i=0; i<nr; i++)); do
+      px=${ROOMx[i]}; py=${ROOMy[i]}; rw=${ROOMw[i]}; rh=${ROOMh[i]}
+      for ((r=py; r<py+rh; r++)); do for ((c=px; c<px+rw; c++)); do (( r>=0&&r<H&&c>=0&&c<W )) && TILE[r*W+c]='·'; done; done
+      for ((r=py-1; r<=py+rh; r++)); do for ((c=px-1; c<=px+rw; c++)); do (( r>=0&&r<H&&c>=0&&c<W )) && NEARROOM[r*W+c]=1; done; done
+    done
+    for ((i=0; i<nr; i++)); do UF[i]=$i; done
+    connect_pass 1 1 1 1 1  # STRICT (+ no hugging Z + length cap): >=2 walls from other halls, <=1 hall/side, turn-legs >=3, corridor <=CORR_MAXLEN
+    ncomp=0                 # count connected components; ==1 means a fully clean, fully reachable layout
+    for ((i=0; i<nr; i++)); do rootr=$i; while (( UF[rootr]!=rootr )); do rootr=${UF[rootr]}; done; (( rootr==i )) && ncomp=$(( ncomp+1 )); done
+    (( ncomp==1 )) && break
+  done
+  # GRADED fallback (only if MAXTRY re-scatters never produced a single clean piece — extremely rare):
+  # loosen one rule at a time, ugliest last, so the map is always playable even when it cannot be perfect.
+  if (( ncomp!=1 )); then
+    connect_pass 1 1 0 1 0  # allow short leg, still no hug (drop the length cap so connectivity is never sacrificed)
+    connect_pass 1 0 0 1 0  # allow 2nd hall/side, still no hug
+    connect_pass 0 0 0 0 0  # OCC-only last resort (allow hug)
+    for oi in "${ORD[@]}"; do      # true last resort (may cross/abut) so every room is reachable
+      a=${EA[oi]}; b=${EB[oi]}
+      ra=$a; while (( UF[ra]!=ra )); do UF[ra]=${UF[UF[ra]]}; ra=${UF[ra]}; done
+      rb=$b; while (( UF[rb]!=rb )); do UF[rb]=${UF[UF[rb]]}; rb=${UF[rb]}; done
+      (( ra!=rb )) && { connect "$a" "$b"; UF[ra]=$rb; }
+    done
+  fi
+  # CLEAN LOOP edges for circle-back / alternate paths. Try EVERY remaining room pair (nearest-first) under
+  # the SAME strict test as the spanning tree, so we add every loop the geometry cleanly allows — and no
+  # more. The strict rules (>=2 walls off other halls, <=1 hall/side, turn-leg >=3, no hug) self-limit the
+  # count: an edge with no clean route is rejected, so this maximises circle-backs without ever stacking,
+  # hugging, or jittering, and can't over-connect into a maze. Already-carved tree edges re-probe as BLOCKED
+  # (their own corridor + used sides), so they're skipped, not double-carved.
+  for oi in "${ORD[@]}"; do
+    CHECKMODE=1; CHKCORR=1; CHKSIDE=1; CHKLEG=1; CHKHUG=1; CHKLEN=1; BLOCKED=0; connect "${EA[oi]}" "${EB[oi]}"; CHECKMODE=0; CHKCORR=0; CHKSIDE=0; CHKLEG=0; CHKHUG=0; CHKLEN=0
+    (( BLOCKED )) || connect "${EA[oi]}" "${EB[oi]}"
+  done
+  # Player in room 0; stairs in the room FARTHEST from it. One gold piece in each of a few random rooms.
+  pr=$(( ROOMy[0]+ROOMh[0]/2 )); pc=$(( ROOMx[0]+ROOMw[0]/2 )); STARTR=$pr; STARTC=$pc   # STARTR/C = the `<` / descend-arrival cell (build_hallway overrides for halls)
+  far=0; fard=-1
+  for ((i=1; i<nr; i++)); do dd=$(( (CX[i]-CX[0])*(CX[i]-CX[0]) + (CY[i]-CY[0])*(CY[i]-CY[0]) )); (( dd>fard )) && { fard=$dd; far=$i; }; done
+  # Stairs go in the farthest room, but NEVER on a row/column that lines up with one of that room's
+  # doors -- so holding an arrow to fast-travel in through a door can't run you straight onto them
+  # (which would skip still-unexplored rooms and their uncollected gold). A door is a corridor cell
+  # (CORR=1) on the room's wall ring; a top/bottom door forbids its column, a left/right door its row.
+  fy0=${ROOMy[far]}; fx0=${ROOMx[far]}; fy1=$(( fy0+ROOMh[far]-1 )); fx1=$(( fx0+ROOMw[far]-1 ))
+  badrow=(); badcol=()
+  for ((c=fx0; c<=fx1; c++)); do
+    (( ${CORR[(fy0-1)*W+c]:-0} )) && badcol[c]=1        # door on top wall    -> vertical entry, dodge this column
+    (( ${CORR[(fy1+1)*W+c]:-0} )) && badcol[c]=1        # door on bottom wall
+  done
+  for ((r=fy0; r<=fy1; r++)); do
+    (( ${CORR[r*W+fx0-1]:-0} )) && badrow[r]=1          # door on left wall   -> horizontal entry, dodge this row
+    (( ${CORR[r*W+fx1+1]:-0} )) && badrow[r]=1          # door on right wall
+  done
+  scy=$(( fy0+ROOMh[far]/2 )); scx=$(( fx0+ROOMw[far]/2 )); sbest=-1; sr=$scy; sc=$scx
+  sbestok=-1; srok=0; scok=0                           # best off-door-line cell that ALSO obeys the spacing rule
+  for ((r=fy0; r<=fy1; r++)); do
+    (( ${badrow[r]:-0} )) && continue
+    for ((c=fx0; c<=fx1; c++)); do
+      (( ${badcol[c]:-0} )) && continue
+      (( r==pr && c==pc )) && continue                  # never under the player (matters on a 1-room floor: far==room 0)
+      dd=$(( (r-scy)*(r-scy)+(c-scx)*(c-scx) ))         # among allowed cells, pick the one nearest room centre
+      (( sbest<0 || dd<sbest )) && { sbest=$dd; sr=$r; sc=$c; }
+      obj_ok "$r" "$c" && { (( sbestok<0 || dd<sbestok )) && { sbestok=$dd; srok=$r; scok=$c; }; }   # prefer a wall-gapped cell
+    done
+  done
+  (( sbestok>=0 )) && { sr=$srok; sc=$scok; }           # spaced cell if one exists, else nearest-centre off-door-line
+  TILE[$(( sr*W+sc ))]='>'; STAIRR=$sr; STAIRC=$sc   # remember the stairs cell so run() can stop level with it
+  # STARS (✱): the explore objective, now SEGMENT-wide. plan_this_floor (run here, once NROOMS is known) set
+  # STARS_HERE — how many of this floor's eligible rooms to seed, ≤1 per room, a random SUBSET (not every
+  # room). Room 0 (the arrival / up-stairs room) is an eligible candidate on every floor EXCEPT the game's
+  # very first (realm 0 / floor 0), so deeper arrival rooms can hold a star — only the true starting room is
+  # reserved. Stars accumulate across a segment's floors toward its target; the floor that completes it is the
+  # BOSS, whose `>` locks until the whole segment is collected (then the key ⚷ appears here). An empty floor
+  # or a 1-room floor seeds none. Placed BEFORE gold so stars get first pick of well-spaced cells (obj_ok:
+  # 1-tile gap from walls + other objects), falling back to any free floor only in a room too tight to obey it.
+  plan_this_floor
+  local star0=0; (( (CUR_REALM!=0 || CUR_FLOOR!=0) && nr>=2 )) && star0=1   # room 0 star-eligible except on the game's first floor
+  rord=(); for ((i=1-star0; i<nr; i++)); do rord+=("$i"); done           # candidate rooms (room 0 included when eligible), then shuffle for the subset
+  for ((i=${#rord[@]}-1; i>0; i--)); do j=$(( RANDOM%(i+1) )); k=${rord[i]}; rord[i]=${rord[j]}; rord[j]=$k; done
+  sp=0
+  for i in "${rord[@]}"; do
+    (( sp>=STARS_HERE )) && break
+    ok=0
+    for tries in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      gy=$(( ROOMy[i]+RANDOM%ROOMh[i] )); gx=$(( ROOMx[i]+RANDOM%ROOMw[i] ))
+      obj_ok "$gy" "$gx" && { TILE[gy*W+gx]='✱'; ok=1; break; }
+    done
+    (( ! ok )) && for ((gy=ROOMy[i]; gy<ROOMy[i]+ROOMh[i] && !ok; gy++)); do for ((gx=ROOMx[i]; gx<ROOMx[i]+ROOMw[i]; gx++)); do
+      obj_ok "$gy" "$gx" && { TILE[gy*W+gx]='✱'; ok=1; break; }
+    done; done
+    (( ! ok )) && for ((gy=ROOMy[i]; gy<ROOMy[i]+ROOMh[i] && !ok; gy++)); do for ((gx=ROOMx[i]; gx<ROOMx[i]+ROOMw[i]; gx++)); do   # last resort: any free floor
+      gidx=$(( gy*W+gx ))
+      [[ "${TILE[gidx]}" == '·' ]] && (( gidx != pr*W+pc )) && { TILE[gidx]='✱'; ok=1; break; }
+    done; done
+    (( ok )) && sp=$(( sp+1 ))
+  done
+  # One gold piece in each of a few random rooms (at most one per room). Gold obeys the SAME spacing rule,
+  # but is OPTIONAL: if a room has no spaced cell free (e.g. it already holds a star/stair), gold is just
+  # SKIPPED there rather than crammed in — in-path gold is a free bonus, never required for completion.
+  ngold=$(( 4 + RANDOM%5 + depth )); (( ngold>nr )) && ngold=$nr   # at most one per room
+  ngold=$(( ngold * 7 / 10 ))                                      # then ~30% less money (scale the EFFECTIVE count, after the per-room cap)
+  rord=(); for ((i=0; i<nr; i++)); do rord[i]=$i; done
+  for ((i=nr-1; i>0; i--)); do j=$(( RANDOM%(i+1) )); k=${rord[i]}; rord[i]=${rord[j]}; rord[j]=$k; done
+  k=0
+  for i in "${rord[@]}"; do
+    (( k>=ngold )) && break
+    ok=0
+    for tries in 1 2 3 4 5 6 7 8; do
+      gy=$(( ROOMy[i]+RANDOM%ROOMh[i] )); gx=$(( ROOMx[i]+RANDOM%ROOMw[i] ))
+      obj_ok "$gy" "$gx" && { TILE[gy*W+gx]='$'; GOLDVAL[gy*W+gx]=$(( 1+RANDOM%20 )); ok=1; break; }
+    done
+    (( ! ok )) && for ((gy=ROOMy[i]; gy<ROOMy[i]+ROOMh[i] && !ok; gy++)); do for ((gx=ROOMx[i]; gx<ROOMx[i]+ROOMw[i]; gx++)); do
+      obj_ok "$gy" "$gx" && { TILE[gy*W+gx]='$'; GOLDVAL[gy*W+gx]=$(( 1+RANDOM%20 )); ok=1; break; }
+    done; done
+    (( ok )) && k=$(( k+1 ))
+  done
+  fgold=0; for gv in "${GOLDVAL[@]}"; do fgold=$(( fgold+gv )); done   # this floor's total gold VALUE (for the hall-monitor toll)
+  WFGOLD[$CUR_REALM,$CUR_FLOOR]=$fgold
+  TOLLON=0                                                            # a normal (non-hall) floor never has a toll monitor
+  cur_room=-1
+  reveal
+}
+
+# Discover what the player can see: the whole current room (+ its walls), plus a 1-tile radius (corridors).
+reveal() {
+  local i r c nl=0 oi
+  cur_room=-1
+  for ((i=0; i<NNODES; i++)); do
+    (( DEAD[i] || ISJUNC[i] )) && continue
+    if (( pr>=ROOMy[i] && pr<ROOMy[i]+ROOMh[i] && pc>=ROOMx[i] && pc<ROOMx[i]+ROOMw[i] )); then cur_room=$i; break; fi
+  done
+  if (( cur_room>=0 )); then
+    [[ -z "${ROOMSEEN[cur_room]:-}" ]] && { ROOMSEEN[cur_room]=1; roomsseen=$(( roomsseen+1 )); }
+    local y0=$(( ROOMy[cur_room]-1 )) y1=$(( ROOMy[cur_room]+ROOMh[cur_room] )) x0=$(( ROOMx[cur_room]-1 )) x1=$(( ROOMx[cur_room]+ROOMw[cur_room] ))
+    for ((r=y0; r<=y1; r++)); do for ((c=x0; c<=x1; c++)); do (( r>=0&&r<H&&c>=0&&c<W )) && DISC[r*W+c]=1; done; done
+  fi
+  # The 3x3 torch puddle: discovers cells AND marks them "seen" (OBJSEEN) — in dark mode the hidden stars/key
+  # only surface once the torch has swept their cell (and stay surfaced after, like the corridors you've lit).
+  # A star/key uncovered for the FIRST time becomes a light source (nl) -> relight + force a full repaint, since
+  # its glow reaches cells outside the player's own dirty box.
+  for ((r=pr-1; r<=pr+1; r++)); do for ((c=pc-1; c<=pc+1; c++)); do
+    (( r>=0&&r<H&&c>=0&&c<W )) || continue
+    oi=$(( r*W+c )); DISC[oi]=1
+    if (( ! OBJSEEN[oi] )); then
+      OBJSEEN[oi]=1
+      (( HARD )) && [[ ${TILE[oi]} == '✱' || ${TILE[oi]} == '⚷' ]] && nl=1
+    fi
+  done; done
+  (( nl )) && { light_map; EVENT=1; }
+}
+
+# Dark mode only: light sources glow, lighting the floor tiles in their 3x3 — the stairs (> <) and money ($),
+# plus any star/key you've ALREADY UNCOVERED with the torch (so a found ✱/⚷ sits in its own pool of light, a
+# little beacon). Rebuild LIGHTMAP (a sparse set of lit cells) whenever a source appears/disappears: floor load,
+# pickup, a newly-swept star/key (see reveal), and the mode toggle.
+light_map() {
+  local i r c rr cc t
+  LIGHTMAP=()
+  for ((i=0; i<W*H; i++)); do
+    t=${TILE[i]}
+    if [[ $t == '>' || $t == '<' || $t == '$' ]]; then :
+    elif [[ $t == '✱' || $t == '⚷' ]] && (( ${OBJSEEN[i]:-0} )); then :   # a star/key glows only after it's found
+    else continue; fi
+    r=$(( i/W )); c=$(( i%W ))
+    for ((rr=r-1; rr<=r+1; rr++)); do for ((cc=c-1; cc<=c+1; cc++)); do
+      (( rr>=0 && rr<H && cc>=0 && cc<W )) && LIGHTMAP[rr*W+cc]=1
+    done; done
+  done
+}
+
+# Whole SEGMENT collected -> the key ⚷ comes into the world on a RANDOM one of the segment's star floors (not
+# always the boss). This only PICKS the floor (KEYFLOOR) — the actual cell is dropped lazily by place_key_cell
+# the first time the hero is on that floor (so the cell ties to that floor's layout). Per-segment state
+# (spawned? which floor? which cell? taken?) is cached in WSEGKEY keyed "realm,segment". EVENT forces a render.
+spawn_key() {
+  local sk="$CUR_REALM,$SEG_IDX" lo hi
+  lo=${WSEGLO[$sk]:-$CUR_FLOOR}; hi=${WSEGHI[$sk]:-$CUR_FLOOR}
+  KEYSPAWNED=1; KEYFLOOR=$(( lo + RANDOM%(hi-lo+1) )); KEYIDX=-1
+  WSEGKEY[$sk]="$KEYSPAWNED $KEYFLOOR $KEYIDX $KEYTAKEN"
+  EVENT=1
+}
+
+# Drop the key glyph onto the CURRENT floor (which must be its KEYFLOOR): a well-spaced free cell (never under
+# the player), insured by any free cell. Caches the chosen cell so revisits redraw it in the same place.
+place_key_cell() {
+  local t ri gy gx gidx
+  KEYIDX=-1
+  for ((t=0; t<96; t++)); do                              # prefer a well-spaced cell (1-tile gap from walls + objects)
+    ri=$(( RANDOM%NROOMS ))
+    gy=$(( ROOMy[ri]+RANDOM%ROOMh[ri] )); gx=$(( ROOMx[ri]+RANDOM%ROOMw[ri] ))
+    obj_ok "$gy" "$gx" && { KEYIDX=$(( gy*W+gx )); break; }
+  done
+  if (( KEYIDX<0 )); then                                  # insurance: first free floor cell anywhere (rule may relax in a tiny room)
+    for ((gidx=0; gidx<W*H; gidx++)); do [[ ${TILE[gidx]} == '·' ]] && (( gidx != pr*W+pc )) && { KEYIDX=$gidx; break; }; done
+  fi
+  (( KEYIDX<0 )) && return
+  TILE[KEYIDX]='⚷'
+  OBJSEEN[KEYIDX]=0          # dark mode: the key starts HIDDEN even if its cell was already torch-swept -> re-sweep to find it
+  WSEGKEY[$CUR_REALM,$SEG_IDX]="$KEYSPAWNED $KEYFLOOR $KEYIDX $KEYTAKEN"
+}
+
+# If the hero is standing on the segment's KEYFLOOR and the key is out & untaken, make sure its glyph is on the
+# map — dropping (and caching) the cell the first time, redrawing the cached cell after.
+ensure_key_glyph() {
+  (( KEYSPAWNED && ! KEYTAKEN && CUR_FLOOR==KEYFLOOR )) || return
+  if (( KEYIDX<0 )); then place_key_cell; else TILE[KEYIDX]='⚷'; fi
+}
+
+# --- scoring: per-phase efficiency ------------------------------------------
+# track_step: count one walked step in the current phase. A cell not yet walked THIS phase (keyed realm,floor,
+# cell — so it spans floors and detects re-treading even across up/down trips) is "new ground"; a repeat is a
+# backtrack. Hooked into try_move / run / jump where the hero actually advances one tile.
+track_step() {
+  local k="$CUR_REALM,$CUR_FLOOR,$(( pr*W+pc ))"
+  PH_STEPS=$(( ${PH_STEPS:-0} + 1 ))
+  [[ -z ${PVIS[$k]:-} ]] && { PH_NEW=$(( ${PH_NEW:-0} + 1 )); PVIS[$k]=1; }
+}
+
+# phase_mult -> REPLY = this phase's live multiplier x100, from new-ground / steps (clamped to [M_MIN,M_MAX]).
+phase_mult() {
+  local steps=${PH_STEPS:-0} new=${PH_NEW:-0} m
+  if (( steps<=0 )); then REPLY=$M_MAX; return; fi          # no steps yet -> optimistic full multiplier
+  m=$(( new*100/steps * MULT_K / 100 ))
+  (( m>M_MAX )) && m=$M_MAX; (( m<M_MIN )) && m=$M_MIN
+  REPLY=$m
+}
+
+# score_pickup PTS: award PTS scaled by the CURRENT phase multiplier, immediately — so SCORE ticks up LIVE on
+# every star (and the key), and a star you found cleanly is worth more than one you backtracked to.
+score_pickup() {
+  phase_mult
+  SCORE=$(( ${SCORE:-0} + $1 * REPLY / 100 ))
+}
+
+# reset_phase: start a fresh scoring phase. Model A — re-walking already-explored floors then counts as NEW
+# ground again, so travelling to a far-spawned key (or back down to the boss) isn't punished; only circling
+# within the new phase is.
+reset_phase() { PVIS=(); PH_STEPS=0; PH_NEW=0; }
+
+# Pick up whatever sits at idx ($2 = its tile char): gold (no score — it just costs steps), a star (scores
+# live, scaled by efficiency; the one that completes the segment ends the stars phase and spawns the key on a
+# random segment floor), or the key itself (scores, then unlocks the segment's boss `>` and ends the key phase).
+collect() {
+  local idx=$1
+  case $2 in
+    '$') gold=$(( gold + ${GOLDVAL[idx]:-1} )); GOLDGONE[idx]=1 ;;   # value was fixed at placement (GOLDVAL), so segment gold totals are known
+    '✱') STARGONE[idx]=1; SEG_GOT=$(( SEG_GOT+1 )); WSEGGOT[$CUR_REALM,$SEG_IDX]=$SEG_GOT
+         score_pickup $STAR_PTS                              # live points for THIS star, scaled by current efficiency
+         if (( SEG_GOT>=SEG_TGT && ! KEYSPAWNED )); then
+           reset_phase; PHASE=2                              # stars done -> find-key phase starts fresh ("high")
+           spawn_key; ensure_key_glyph                       # key appears on a random segment floor
+         fi ;;
+    '⚷') KEYTAKEN=1; WSEGKEY[$CUR_REALM,$SEG_IDX]="$KEYSPAWNED $KEYFLOOR $KEYIDX $KEYTAKEN"
+         score_pickup $KEY_PTS                               # live points for the key
+         reset_phase; PHASE=1                                # next segment starts back at the stars phase
+         BARMSG='STAIRS UNLOCKED'; EVENT=1 ;;
+  esac
+  TILE[idx]='·'
+  (( HARD )) && light_map        # the picked-up item ($ / ✱ / ⚷) was a glowing light source -> drop its glow
+}
+
+# The hall monitor `&` is a THREE-STAGE bump conversation (he never shares his cell): the 1st bump just TELLS
+# you his status — the toll + "bump to pay", or how much MORE you need if you can't afford it, or "free to pass"
+# once it's been paid; the 2nd bump PAYS the toll (if you can afford it, else it re-tells the shortfall); the
+# 3rd bump steps you PAST him to the far side (he stays put). An already-paid monitor skips the pay stage, so
+# it's a 2-bump pass (status -> pass). TOLLPHASE tracks the stage for THIS floor visit (reset on arrival in
+# load_floor); WTOLLPAID (persistent per floor) tracks payment across revisits/resize. Shared by try_move
+# (single step) AND run/jump (fast travel) so the PASS honours whichever move you used: returns 0 when the hero
+# stepped past (so run/jump keep travelling), 1 when the bump only talked/charged (so they stop adjacent).
+bump_monitor() {
+  local dr=$1 dc=$2 mr=$3 mc=$4 paid=0
+  [[ -n ${WTOLLPAID[$CUR_REALM,$CUR_FLOOR]:-} ]] && paid=1
+  if (( TOLLPHASE==0 )); then                                 # 1st bump: announce status only (no charge, no move)
+    TOLLPHASE=1; EVENT=1; STICKYMSG=1                          # STICKYMSG -> the monitor message stays up (no ~750ms auto-clear) until your next action
+    if   (( paid ));          then BARMSG="PAID ${TOLLAMT}g · FREE TO PASS"
+    elif (( gold>=TOLLAMT )); then BARMSG="TOLL ${TOLLAMT}g · BUMP TO PAY"
+    else                           BARMSG="TOLL ${TOLLAMT}g · NEED $(( TOLLAMT-gold ))g MORE"; fi
+    return 1
+  fi
+  if (( ! paid )); then                                       # 2nd bump on an unpaid monitor: take payment (still no move)
+    (( gold<TOLLAMT )) && { BARMSG="NEED $(( TOLLAMT-gold ))g MORE"; EVENT=1; STICKYMSG=1; return 1; }   # can't afford -> re-tell shortfall, stay put
+    gold=$(( gold-TOLLAMT )); WTOLLPAID[$CUR_REALM,$CUR_FLOOR]=1; TOLLPHASE=2
+    BARMSG="PAID ${TOLLAMT}g · BUMP TO PASS"; EVENT=1; STICKYMSG=1; return 1
+  fi
+  local fr=$(( mr+dr )) fc=$(( mc+dc ))                       # paid + greeted: step PAST him (skip his cell), either direction
+  if (( fr>=0 && fr<H && fc>=0 && fc<W )) && [[ ${TILE[fr*W+fc]} != '#' ]]; then
+    pr=$fr; pc=$fc; track_step; reveal; EVENT=1; return 0     # moved through -> caller (run/jump) may keep travelling
+  fi
+  EVENT=1; return 1
+}
+
+# Pace the hall monitor one cell along his patrol [TOLL_LO,TOLL_HI], reversing at the ends — called once per
+# hero STEP (a single move, and each tile of a run/jump) so he moves in lock-step with you, turn-based like a
+# roguelike monster (no timer; the game stays redraw-on-input). He HOLDS when you're adjacent, so you can always
+# bump him and he never lands on you. Updates TILE; for the single-step DIRTY path he records his moved cells in
+# MON_* so move_step can repaint them (run/jump full-render anyway). No-op off a monitor hall (TOLLON=0), so
+# every other floor is untouched. The hall is one room, fully revealed on entry, so he's visible the whole way.
+pace_monitor() {
+  MON_MOVED=0
+  (( TOLLON )) || return
+  (( pr==TOLLR && pc>=TOLLC-1 && pc<=TOLLC+1 )) && return       # hero adjacent -> hold (bump me; never overlap)
+  local nc=$(( TOLLC + TOLL_DIR ))
+  (( nc<TOLL_LO || nc>TOLL_HI )) && { TOLL_DIR=$(( -TOLL_DIR )); nc=$(( TOLLC + TOLL_DIR )); }   # bounce at a wall end
+  (( nc<TOLL_LO || nc>TOLL_HI )) && return                      # patrol too short (lo==hi) -> can't move
+  (( pr==TOLLR && nc==pc )) && return                           # never step onto the hero
+  TILE[TOLLR*W+TOLLC]='·'; MON_OC=$TOLLC; TILE[TOLLR*W+nc]='&'; TOLLC=$nc
+  MON_OR=$TOLLR; MON_NR=$TOLLR; MON_NC=$nc; MON_MOVED=1
+}
+
+# Try to step ($1=dr,$2=dc); walls block. Stepping on unlocked stairs switches floors; a LOCKED `>`
+# (stars remain, or the key is out there untaken) refuses the step and says why on the status bar.
+try_move() {
+  local nr=$(( pr+$1 )) nc=$(( pc+$2 )) t
+  (( nr<0||nr>=H||nc<0||nc>=W )) && return
+  t=${TILE[nr*W+nc]}
+  [[ "$t" == '#' ]] && return
+  if [[ "$t" == '&' ]]; then bump_monitor "$1" "$2" "$nr" "$nc"; return; fi   # hall monitor: status -> pay -> pass, one bump each
+  if [[ "$t" == '>' ]] && (( IS_BOSS && ! KEYTAKEN )); then
+    BARMSG='STAIRS LOCKED'                                # only BOSS floors lock; detail (stars left / key) is in the HUD tracker
+    EVENT=1; FLASH=1; return                              # bump a locked down-stair -> message + a red flash on the stair (flash_stair)
+  fi
+  pr=$nr; pc=$nc; track_step                                 # count the walked step (on THIS floor, before any descend/collect)
+  if   [[ "$t" == '>' ]]; then descend                       # step onto down-stairs -> next floor (paired)
+  elif [[ "$t" == '<' ]]; then ascend                        # step onto up-stairs   -> previous floor (paired)
+  elif [[ "$t" == '$' || "$t" == '✱' || "$t" == '⚷' ]]; then collect $(( nr*W+nc )) "$t"; reveal
+  else reveal; fi
+}
+
+# DASH-SCOUT: uncover stars/key up to SCOUT tiles OFF the hero's current cell (wider than the 3x3 torch), but
+# only on floor already seen (DISC) — it helps spot the last few items in a room you've explored, and never
+# peeks through walls into new rooms. Uncovered items show AND become light sources. Shared by run + jump
+# (both sweep faster than tapping, so both scout). Returns 0 if it uncovered something new (caller relights).
+scout() {
+  local r c oi found=1
+  for ((r=pr-SCOUT; r<=pr+SCOUT; r++)); do for ((c=pc-SCOUT; c<=pc+SCOUT; c++)); do
+    (( r<0||r>=H||c<0||c>=W )) && continue
+    oi=$(( r*W+c ))
+    [[ ${TILE[oi]} == '✱' || ${TILE[oi]} == '⚷' ]] && (( DISC[oi] && ! OBJSEEN[oi] )) && { OBJSEEN[oi]=1; found=0; }
+  done; done
+  return $found
+}
+
+# Fast-travel stop-IN-LINE: while running/jumping inside a room, if the hero's COLUMN (moving horizontally) or
+# ROW (moving vertically) lines up with a VISIBLE object elsewhere in that room, return 0 so the caller halts --
+# you can then turn and walk straight to it instead of sweeping past its line. Gold `$` is always visible; a
+# star `✱` / key `⚷` counts only once the torch has revealed it (OBJSEEN). Corridors (cur_room<0) never trigger.
+aligned_object() {
+  local dr=$1 dc=$2 rm=$cur_room a oi ot
+  (( rm<0 )) && return 1
+  if (( dc )); then                                            # horizontal -> scan the hero's COLUMN within the room
+    for ((a=ROOMy[rm]; a<ROOMy[rm]+ROOMh[rm]; a++)); do
+      (( a==pr )) && continue
+      oi=$(( a*W+pc )); ot=${TILE[oi]}
+      [[ $ot == '$' ]] && return 0
+      { [[ $ot == '✱' || $ot == '⚷' ]] && (( ${OBJSEEN[oi]:-0} )); } && return 0
+    done
+  else                                                         # vertical -> scan the hero's ROW within the room
+    for ((a=ROOMx[rm]; a<ROOMx[rm]+ROOMw[rm]; a++)); do
+      (( a==pc )) && continue
+      oi=$(( pr*W+a )); ot=${TILE[oi]}
+      [[ $ot == '$' ]] && return 0
+      { [[ $ot == '✱' || $ot == '⚷' ]] && (( ${OBJSEEN[oi]:-0} )); } && return 0
+    done
+  fi
+  return 1
+}
+
+# Run/travel ($1=dr,$2=dc): keep stepping until the next tile is anything but plain floor (a wall, a stair, OR
+# an object $ ✱ ⚷), a corridor junction, a room<->corridor boundary, OR (inside a room) the hero lining up with
+# a doorway on a PERPENDICULAR wall, with EITHER stair, or with ANY visible object's row/column -- so you can
+# stop level with it and turn to it instead of overshooting. So every object and stair is a STOP POINT: run
+# never auto-collects an item or auto-takes a stair -- it halts (one tile short of in-path items, or level with
+# off-line ones) and you step onto it yourself. Scouts items off its path; reveals each step; the caller renders
+# only once (crossing a long hall = ONE redraw, fast + lag-free).
+run() {
+  local dr=$1 dc=$2 step nr nc t idx start now junc rm sthere uphere nl=0 pr0=$pr pc0=$pc   # pr0/pc0: where this travel began (the monitor takes ONE step per command, not per tile)
+  idx=$(( pr*W+pc )); start=0; [[ ${TILE[idx]} == '·' && -z ${CORR[idx]:-} ]] && start=1   # 1=in a room, 0=corridor
+  for ((step=0; step<W+H; step++)); do
+    nr=$(( pr+dr )); nc=$(( pc+dc ))
+    (( nr<0||nr>=H||nc<0||nc>=W )) && break
+    idx=$(( nr*W+nc )); t=${TILE[idx]}
+    if [[ $t == '&' ]]; then bump_monitor "$dr" "$dc" "$nr" "$nc" || break; scout && nl=1; continue; fi   # hall monitor: talk/pay -> stop adjacent; paid -> step past & keep travelling
+    [[ $t != '·' ]] && break                                     # STOP at anything but plain floor: wall, stair, OR object ($ ✱ ⚷) -- never auto-take/collect; step onto it yourself
+    pr=$nr; pc=$nc; track_step                                    # take the step (and count it for scoring)
+    reveal; scout && nl=1                                         # reveal the torch puddle + scout items off the path
+    now=0; [[ ${TILE[idx]} == '·' && -z ${CORR[idx]:-} ]] && now=1
+    (( now != start )) && break                                  # crossed a room<->corridor boundary -> stop
+    if (( ! now )); then                                         # in a corridor: stop where a side passage opens
+      junc=0
+      if (( dc )); then
+        (( pr>0   )) && [[ ${TILE[(pr-1)*W+pc]} != '#' ]] && junc=1
+        (( pr<H-1 )) && [[ ${TILE[(pr+1)*W+pc]} != '#' ]] && junc=1
+      else
+        (( pc>0   )) && [[ ${TILE[pr*W+pc-1]} != '#' ]] && junc=1
+        (( pc<W-1 )) && [[ ${TILE[pr*W+pc+1]} != '#' ]] && junc=1
+      fi
+      (( junc )) && break
+    elif (( cur_room>=0 )); then                                 # in a room: stop level with a PERPENDICULAR door -- or EITHER stair
+      rm=$cur_room
+      sthere=0; (( STAIRR>=ROOMy[rm] && STAIRR<ROOMy[rm]+ROOMh[rm] && STAIRC>=ROOMx[rm] && STAIRC<ROOMx[rm]+ROOMw[rm] )) && sthere=1   # down-stair `>` in this room?
+      uphere=0; (( UPSTAIRR>=ROOMy[rm] && UPSTAIRR<ROOMy[rm]+ROOMh[rm] && UPSTAIRC>=ROOMx[rm] && UPSTAIRC<ROOMx[rm]+ROOMw[rm] )) && uphere=1   # up-stair `<` in this room? (UPSTAIRR=-1 => none)
+      if (( dc )); then                                          # moving horizontally -> a top/bottom-wall door, or a stair, at this column
+        (( ROOMy[rm]>0          && ${CORR[(ROOMy[rm]-1)*W+pc]:-0} ))            && break
+        (( ROOMy[rm]+ROOMh[rm]<H && ${CORR[(ROOMy[rm]+ROOMh[rm])*W+pc]:-0} ))   && break
+        (( sthere && pc==STAIRC )) && break
+        (( uphere && pc==UPSTAIRC )) && break                    # stop level with the up-stair too (was the asymmetry that let runs blow past `<`)
+      else                                                       # moving vertically -> a left/right-wall door, or a stair, at this row
+        (( ROOMx[rm]>0          && ${CORR[pr*W+ROOMx[rm]-1]:-0} ))             && break
+        (( ROOMx[rm]+ROOMw[rm]<W && ${CORR[pr*W+ROOMx[rm]+ROOMw[rm]]:-0} ))    && break
+        (( sthere && pr==STAIRR )) && break
+        (( uphere && pr==UPSTAIRR )) && break
+      fi
+      aligned_object "$dr" "$dc" && break                        # also stop level with any VISIBLE object's row/column in this room
+    fi
+  done
+  (( pr!=pr0 || pc!=pc0 )) && pace_monitor                       # one monitor step for the whole travel (only if you actually moved)
+  (( nl )) && light_map                                          # newly-uncovered stars/key glow on the next render
+}
+
+# Jump ($1=dr,$2=dc): a fixed dash of up to 10 tiles in one direction, stopping early at the edge, the first
+# tile that isn't plain floor (a wall, a stair, OR an object $ ✱ ⚷), or when the hero comes level with a visible
+# object's row/column in the room. Like run, it never auto-takes a stair or auto-collects an item; you step onto
+# it yourself. Scouts items off its path. Reveals each step; caller renders once.
+jump() {
+  local dr=$1 dc=$2 step nr nc t idx nl=0 pr0=$pr pc0=$pc   # pr0/pc0: jump start (the monitor takes ONE step per command, not per tile)
+  for ((step=0; step<10; step++)); do
+    nr=$(( pr+dr )); nc=$(( pc+dc ))
+    (( nr<0||nr>=H||nc<0||nc>=W )) && break
+    idx=$(( nr*W+nc )); t=${TILE[idx]}
+    if [[ $t == '&' ]]; then bump_monitor "$dr" "$dc" "$nr" "$nc" || break; scout && nl=1; continue; fi   # hall monitor: talk/pay -> stop adjacent; paid -> step past & keep travelling
+    [[ $t != '·' ]] && break                                     # STOP at any wall / stair / object (never auto-take or collect)
+    pr=$nr; pc=$nc; track_step
+    reveal; scout && nl=1                                         # reveal the torch puddle + scout items off the path
+    aligned_object "$dr" "$dc" && break                          # stop level with any visible object's row/column
+  done
+  (( pr!=pr0 || pc!=pc0 )) && pace_monitor                       # one monitor step for the whole jump (only if you actually moved)
+  (( nl )) && light_map                                          # newly-uncovered stars/key glow on the next render
+}
+
+# --- box-drawing walls + doors + gray corridors (DOS / Epyx Rogue terrain; only when TDOS=1) -------------
+# A '#' BORDER cell (a wall with >=1 open 8-neighbour) renders as a DOUBLE-line drawing glyph linking to each
+# orthogonal neighbour that is ALSO a border wall — so the solid rock BEHIND a room's ring never connects and
+# rooms draw as clean rectangles. A DOOR (a corridor tile on a room's threshold) renders as an amber '+', and
+# every other corridor tile as a gray '▒' block. Wall glyphs are memoised per floor in BOXMAP (walls are static
+# once generated). The default tileset (TDOS=0) skips all of this and draws plain green '#' / green-dot floor.
+BOXCH=( $'═' $'═' $'═' $'═' $'║' $'╔' $'╗' $'╦' $'║' $'╚' $'╝' $'╩' $'║' $'╠' $'╣' $'╬' )  # double-line; index = u<<3|d<<2|l<<1|r
+DOORGLYPH=''   # set by _door() to the orientation-correct doorway glyph: '║' (corridor enters vertically) / '═' (horizontally)
+DOS_WALL_LIT=$'\e[38;2;224;144;47m'; DOS_WALL_DIM=$'\e[38;2;122;79;26m'    # DOS walls: orange (current room / explored-dim)
+DOS_HALL_LIT=$'\e[38;2;170;170;170m'; DOS_HALL_DIM=$'\e[38;2;90;90;90m'    # DOS corridors: gray '▒' (lit / dim)
+DOS_HALL_BG=$'\e[48;2;96;96;96m'                                          # gray cell-fill behind the @ when it stands on a hallway tile (so it doesn't punch a black hole in the corridor)
+DOS_DOOR=$'\e[1;38;2;232;162;66m'; DOS_DOOR_DIM=$'\e[1;38;2;122;79;26m'    # DOS doors: bold orange (active room) / dim — so a doorway dims with its room, like the walls
+_roomwall() {  # is (r,c) a ROOM wall? ('#' with >=1 open NON-corridor 8-neighbour). Rock that only touches a
+  local r=$1 c=$2 rr cc nb   # corridor (or nothing) is NOT a room wall -> stays black, so corridors are bare '▒' in the void like DOS Rogue
+  (( r<0||r>=H||c<0||c>=W )) && return 1
+  [[ ${TILE[r*W+c]} == '#' ]] || return 1
+  for ((rr=r-1; rr<=r+1; rr++)); do
+    (( rr<0||rr>=H )) && continue
+    for ((cc=c-1; cc<=c+1; cc++)); do
+      (( cc<0||cc>=W||(rr==r&&cc==c) )) && continue
+      nb=$(( rr*W+cc ))
+      [[ ${TILE[nb]} != '#' ]] && (( ! ${CORR[nb]:-0} )) && return 0   # an open, NON-corridor neighbour = room interior
+    done
+  done
+  return 1
+}
+box_wall() {  # REPLY = the line-drawing glyph for the room-wall '#' at (r,c) — links only to other room walls (memoised)
+  local idx=$(( $1*W+$2 ))
+  [[ -n ${BOXMAP[idx]:-} ]] && { REPLY=${BOXMAP[idx]}; return; }
+  local r=$1 c=$2 m=0
+  _roomwall $((r-1)) "$c"   && m=$(( m|8 ))
+  _roomwall $((r+1)) "$c"   && m=$(( m|4 ))
+  _roomwall "$r" $((c-1))   && m=$(( m|2 ))
+  _roomwall "$r" $((c+1))   && m=$(( m|1 ))
+  REPLY=${BOXCH[m]}; BOXMAP[idx]=$REPLY
+}
+_door() {  # is the corridor cell at (r,c) a door? (a CORR tile touching a room-interior floor). Sets DOORGLYPH to
+  local idx=$(( $1*W+$2 )) c=$2 nb   # the door glyph: '║' for a vertical corridor; a full cross '╬' for a horizontal one (joins the walls + runs the passage into the room)
+  (( ${CORR[idx]:-0} )) || return 1
+  for nb in $((idx-W)) $((idx+W)); do                         # room interior above/below -> a VERTICAL corridor passes through -> ║
+    (( nb>=0 && nb<W*H )) && [[ ${TILE[nb]} != '#' ]] && (( ! ${CORR[nb]:-0} )) && { DOORGLYPH='║'; return 0; }
+  done
+  nb=$(( idx-1 )); (( c>0 ))   && [[ ${TILE[nb]} != '#' ]] && (( ! ${CORR[nb]:-0} )) && { DOORGLYPH='╬'; return 0; }   # room interior left/right -> a HORIZONTAL corridor: full cross — ║ joins the walls, ═ runs the passage INTO the room AND the corridor
+  nb=$(( idx+1 )); (( c<W-1 )) && [[ ${TILE[nb]} != '#' ]] && (( ! ${CORR[nb]:-0} )) && { DOORGLYPH='╬'; return 0; }
+  return 1
+}
+
+render() {
+  local out r c cw idx ch lit intorch flit has=$cur_room ry0=0 ry1=-1 rx0=0 rx1=-1 row hud vl pad gs
+  if (( has>=0 )); then ry0=$(( ROOMy[has]-1 )); ry1=$(( ROOMy[has]+ROOMh[has] )); rx0=$(( ROOMx[has]-1 )); rx1=$(( ROOMx[has]+ROOMw[has] )); fi
+  printf -v gs '%*s' "$GUTTER" ''   # the map's left-gutter spaces (the bar uses its own 1-space inset, see below)
+  out="$HOME"
+  # Status bar (row 1): a full-width dark-green field — Infocom/Zork-style. Condensed: `SCORE n · GOLD g` on
+  # the LEFT, and the transient message flush RIGHT — the rest (realm/floor/depth, segment + live multiplier,
+  # rooms, stars, key, seed) lives in the `m` overlay now. Both ends inset by GUTTER to align with the map; the
+  # `$BAR` bg persists (no `$R` until the end) so it fills edge to edge through the colour spans + the pad. The
+  # right message is `…`-clipped if it would collide with the score, so it can never wrap onto the map. SCORE
+  # ticks up live as you grab each star/key (scaled by efficiency); the current multiplier shows in `m`.
+  local gv="${D}"; (( gold>0 )) && gv="${GOLD}"   # GOLD label stays phosphor green; only the number lights up amber once you have any
+  hud=" ${BOLD}${A}SCORE ${P}${SCORE}${A} · GOLD ${gv}${gold}"   # single-space left inset on the bar
+  strip_ansi "$hud"; vl=${#REPLY}
+  # Right side: the transient MESSAGE *or* the objective tracker `⚷ [ ✱… ]`. A message owns the right while it's
+  # up. An EMPTY between-segments floor shows NOTHING here (no stars/key to track); any in-segment floor shows
+  # the tracker once the message clears. The tracker tracks the
+  # CURRENT SEGMENT (resets per segment, so the bracket stays ~6-10 wide): the key ⚷ (dim green not-placed /
+  # gold on-map / phosphor-green held) then a `[ ✱… ]` bracket of SEG_TGT pips, SEG_GOT filled bright. Both sit
+  # flush-right with a 1-space inset; a too-long message is `…`-clipped so it can't wrap onto the map.
+  local right="" rw=0 si us thishere
+  if [[ -n $BARMSG ]] && (( COLS-vl-1 >= 4 )); then
+    clip_visible "${BOLD}${D}${BARMSG}" $(( COLS-vl-1 )); right=$REPLY   # messages in dim green
+  elif (( SEG_TGT>0 && ! IS_EMPTY )); then              # empty between-segments floors show NOTHING (no stars/key to track)
+    if   (( KEYTAKEN ));   then right="${A}${TKEY}"          # the key first, four states:
+    elif (( KEYSPAWNED && CUR_FLOOR==KEYFLOOR )); then right="${GOLD}${TKEY}"   # gold        — you're ON its floor; the key is in view
+    elif (( KEYSPAWNED )); then right="${D}${TKEY}"          #   dim green       — spawned, somewhere else in this segment
+    else                        right="${DK}${TKEY}"; fi     #   darkest green   — not placed yet (still collecting the stars)
+    right+=" ${A}[ "
+    # pips, 3 tiers: collected = bright; uncollected on THIS floor = dim `D`; uncollected on OTHER floors =
+    # darkest `DK`. So the count of DIM pips = how many stars are still hidden on this floor (rest are deeper).
+    us=$(( ${STARS_HERE:-0} - ${#STARGONE[@]} )); thishere=$(( SEG_GOT + us ))   # collected + this-floor uncollected
+    (( thishere>SEG_TGT )) && thishere=$SEG_TGT
+    for ((si=0; si<SEG_TGT; si++)); do
+      (( si>0 )) && right+=" "
+      if   (( si<SEG_GOT ));  then right+="${STAR}${TSTAR}"     # collected
+      elif (( si<thishere )); then right+="${D}${TSTAR}"        # still hidden on THIS floor (to find)
+      else                         right+="${HUDDIM}${TSTAR}"; fi # on another floor (deeper) — HUDDIM (=DK), darker than the bar so it still reads
+    done
+    right+="${A} ]"
+  fi
+  strip_ansi "$right"; rw=${#REPLY}
+  pad=$(( COLS - vl - rw - 1 )); (( pad<0 )) && pad=0           # 1-space inset on the right so it isn't jammed against the edge
+  out+="${BAR}${hud}${A}$(printf '%*s' "$pad" '')${right}${BAR} ${R}${EOL}"$'\n'
+  for ((r=0; r<H; r++)); do
+    row=""
+    cw=$W; (( r==H-1 && GUTTER<1 )) && cw=$(( W-1 ))   # last row with no right gutter: skip the bottom-right cell (scroll guard)
+    for ((c=0; c<cw; c++)); do
+      if (( r==pr && c==pc )); then if (( TDOS && ${CORR[pr*W+pc]:-0} )); then row+="${DOS_HALL_BG}${BOLD}${P}${TPLAYER}${R}"; else row+="${BOLD}${P}${TPLAYER}${R}"; fi; continue; fi
+      idx=$(( r*W+c ))
+      if (( ! DISC[idx] )); then row+=" "; continue; fi
+      ch=${TILE[idx]}
+      lit=0; intorch=0
+      (( has>=0 && r>=ry0 && r<=ry1 && c>=rx0 && c<=rx1 )) && lit=1   # current room lights its walls (+floor in normal mode)
+      (( r>=pr-1 && r<=pr+1 && c>=pc-1 && c<=pc+1 )) && intorch=1     # the 3x3 torch puddle around the hero
+      # flashlight lights floor + CORRIDOR walls, but never a room's walls — so a hallway glows without
+      # lighting an adjacent room's junction walls.
+      (( intorch )) && { [[ "$ch" != '#' ]] || [[ -z "${NEARROOM[idx]:-}" ]]; } && lit=1
+      flit=$lit
+      if (( HARD )); then                                            # DARK MODE: room floors only glow under the torch
+        flit=$intorch                                               #   or near a light source (stairs/money);
+        (( ${LIGHTMAP[idx]:-0} )) && flit=1
+        { [[ "$ch" == '✱' || "$ch" == '⚷' ]] && (( ${OBJSEEN[idx]:-0}==0 )); } && ch='·'   # stars/key hidden until torch-swept
+      fi
+      case "$ch" in
+        '>') row+="${SBG}${BOLD}${BLK}${TDOWN}${R}" ;;   # down-stairs (tile '>'): ALWAYS a green block; "locked" shows as a red FLASH on bump (flash_stair), not a resting colour
+        '<') row+="${BOLD}${A}${TUP}${R}" ;;   # up-stairs (tile '<'): plain bold green (return to previous floor; never locked)
+        '$') row+="${BOLD}${GOLD}${TGOLD}${R}" ;;   # money: bold amber gold
+        '✱') row+="${STAR}${TSTAR}${R}" ;;   # star (phosphor green) — collect every one to reveal the key
+        '⚷') row+="${BOLD}${GOLD}${TKEY}${R}" ;;   # the key (bold amber) — unlocks this floor's down-stairs
+        '&') row+="${BOLD}${CYAN}${TMON}${R}" ;;   # the hall monitor (bold cyan) — pay his toll to pass
+        '#') if (( ! TDOS )); then (( lit )) && row+="${A}${TWALL}${R}" || row+="${DK}${TWALL}${R}"   # default: plain green '#'
+             elif _roomwall "$r" "$c"; then box_wall "$r" "$c"; (( lit )) && row+="${DOS_WALL_LIT}${REPLY}${R}" || row+="${DOS_WALL_DIM}${REPLY}${R}"   # DOS: double-line orange room wall
+             else row+=" "; fi ;;   # DOS: corridor-adjacent / deep rock stays black (corridors are bare '▒' in the void)
+        '·') if (( TDOS )) && _door "$r" "$c"; then (( lit )) && row+="${DOS_DOOR}${DOORGLYPH}${R}" || row+="${DOS_DOOR_DIM}${DOORGLYPH}${R}"   # DOS: doorway stub — dims with its room like the walls
+             elif (( TDOS )) && (( ${CORR[idx]:-0} )); then (( flit )) && row+="${DOS_HALL_LIT}${TCORR}${R}" || row+="${DOS_HALL_DIM}${TCORR}${R}"   # DOS: gray corridor block
+             elif (( flit )); then row+="${BOLD}${A}${TFLOOR}${R}"; else row+="${BOLD}${DK}${TFLOOR}${R}"; fi ;;   # room floor: phosphor-green dot
+        *)   row+=" " ;;
+      esac
+    done
+    out+="${gs}${row}${EOL}"; (( r<H-1 )) && out+=$'\n'   # GUTTER-space left gutter; right gutter = unused trailing columns; last line carries no newline (no scroll)
+  done
+  printf '%s' "$out"
+}
+
+# Colour string for a single map cell -> REPLY (exactly one visible column).
+# *** KEEP IN SYNC with render()'s inner-cell logic above (the @/fog/lit/case block). ***
+# Used by the dirty-rectangle fast path so a single step repaints only the cells it changed.
+cell_str() {
+  local r=$1 c=$2 idx ch lit intorch flit has=$cur_room
+  if (( r==pr && c==pc )); then if (( TDOS && ${CORR[pr*W+pc]:-0} )); then REPLY="${DOS_HALL_BG}${BOLD}${P}${TPLAYER}${R}"; else REPLY="${BOLD}${P}${TPLAYER}${R}"; fi; return; fi
+  idx=$(( r*W+c ))
+  if (( ! DISC[idx] )); then REPLY=" "; return; fi
+  ch=${TILE[idx]}
+  lit=0; intorch=0
+  (( has>=0 && r>=ROOMy[has]-1 && r<=ROOMy[has]+ROOMh[has] && c>=ROOMx[has]-1 && c<=ROOMx[has]+ROOMw[has] )) && lit=1
+  (( r>=pr-1 && r<=pr+1 && c>=pc-1 && c<=pc+1 )) && intorch=1
+  (( intorch )) && { [[ "$ch" != '#' ]] || [[ -z "${NEARROOM[idx]:-}" ]]; } && lit=1
+  flit=$lit
+  if (( HARD )); then
+    flit=$intorch
+    (( ${LIGHTMAP[idx]:-0} )) && flit=1
+    { [[ "$ch" == '✱' || "$ch" == '⚷' ]] && (( ${OBJSEEN[idx]:-0}==0 )); } && ch='·'
+  fi
+  case "$ch" in
+    '>') REPLY="${SBG}${BOLD}${BLK}${TDOWN}${R}" ;;   # down-stairs: ALWAYS green block (locked = red flash on bump) (KEEP IN SYNC with render)
+    '<') REPLY="${BOLD}${A}${TUP}${R}" ;;   # up-stairs plain bold green (KEEP IN SYNC with render)
+    '$') REPLY="${BOLD}${GOLD}${TGOLD}${R}" ;;   # money: bold amber gold (KEEP IN SYNC with render)
+    '✱') REPLY="${STAR}${TSTAR}${R}" ;;   # phosphor green (KEEP IN SYNC with render)
+    '⚷') REPLY="${BOLD}${GOLD}${TKEY}${R}" ;;   # bold (KEEP IN SYNC with render)
+    '&') REPLY="${BOLD}${CYAN}${TMON}${R}" ;;   # hall monitor, bold cyan (KEEP IN SYNC with render)
+    '#') if (( ! TDOS )); then (( lit )) && REPLY="${A}${TWALL}${R}" || REPLY="${DK}${TWALL}${R}"   # default: plain green '#' (KEEP IN SYNC)
+         elif _roomwall "$r" "$c"; then box_wall "$r" "$c"; (( lit )) && REPLY="${DOS_WALL_LIT}${REPLY}${R}" || REPLY="${DOS_WALL_DIM}${REPLY}${R}"   # DOS: orange room wall (KEEP IN SYNC)
+         else REPLY=" "; fi ;;   # DOS: corridor/deep rock stays black (KEEP IN SYNC)
+    '·') if (( TDOS )) && _door "$r" "$c"; then (( lit )) && REPLY="${DOS_DOOR}${DOORGLYPH}${R}" || REPLY="${DOS_DOOR_DIM}${DOORGLYPH}${R}"   # DOS: doorway dims with its room (KEEP IN SYNC with render)
+         elif (( TDOS )) && (( ${CORR[idx]:-0} )); then (( flit )) && REPLY="${DOS_HALL_LIT}${TCORR}${R}" || REPLY="${DOS_HALL_DIM}${TCORR}${R}"   # DOS: gray corridor (KEEP IN SYNC)
+         elif (( flit )); then REPLY="${BOLD}${A}${TFLOOR}${R}"; else REPLY="${BOLD}${DK}${TFLOOR}${R}"; fi ;;
+    *)   REPLY=" " ;;
+  esac
+}
+
+# Grow the batch dirty-rect (grid coords) to include the box (r0,c0)-(r1,c1), clamped to the map.
+dirty_box() {
+  local r0=$1 c0=$2 r1=$3 c1=$4
+  (( r0<0 )) && r0=0; (( c0<0 )) && c0=0; (( r1>H-1 )) && r1=$((H-1)); (( c1>W-1 )) && c1=$((W-1))
+  (( r0<DRr0 )) && DRr0=$r0; (( c0<DRc0 )) && DRc0=$c0
+  (( r1>DRr1 )) && DRr1=$r1; (( c1>DRc1 )) && DRc1=$c1
+}
+
+# Repaint just the accumulated dirty-rect via cursor addressing. Map cell (r,c) sits at terminal
+# row r+2 (row 1 = status bar) and col c+GUTTER+1 (left gutter). Never writes the last column
+# (right gutter) so it can't trigger the bottom-right-cell scroll. Far cheaper than a full render.
+paint_dirty() {
+  (( DRr1<DRr0 || DRc1<DRc0 )) && return
+  local r c out=""
+  for ((r=DRr0; r<=DRr1; r++)); do
+    out+=$'\e['$((r+2))';'$((DRc0+GUTTER+1))'H'   # jump to the box's start column on this row
+    for ((c=DRc0; c<=DRc1; c++)); do cell_str "$r" "$c"; out+="$REPLY"; done
+  done
+  printf '%s' "$out"
+}
+
+# A run of $2 copies of the box-drawing char $1, to stdout (used to build box edges via command subst).
+hrule() { local i; for ((i=0; i<$2; i++)); do printf '%s' "$1"; done; }
+
+# Truncate $1 to at most $2 VISIBLE columns (ANSI-aware: escape sequences are copied but not counted),
+# appending a dim `…` + reset when it had to cut. Result in REPLY. Lets overlay() fit a too-wide line into
+# a narrow terminal without the line wrapping and breaking the box.
+clip_visible() {
+  local s=$1 max=$2
+  strip_ansi "$s"; (( ${#REPLY} <= max )) && { REPLY=$s; return; }
+  local out='' vis=0 re=$'^\e\[[0-9;?]*[a-zA-Z]'
+  while [[ -n $s && $vis -lt max-1 ]]; do
+    if [[ $s =~ $re ]]; then out+=${BASH_REMATCH[0]}; s=${s#"${BASH_REMATCH[0]}"}
+    else out+=${s:0:1}; s=${s:1}; vis=$(( vis+1 )); fi
+  done
+  REPLY="${out}${D}…${R}"
+}
+
+# Build aligned two-column rows from (key, desc) PAIRS into the array named by $1 (nameref). The left
+# column is padded to the widest key's VISIBLE width (strip_ansi, so ANSI + multibyte glyphs measure as
+# displayed), then a 3-space gutter, then the desc. A pair whose key is the sentinel "@RULE@" passes
+# through verbatim so overlay() can turn it into a horizontal divider.
+table2() {
+  local -n _out=$1; shift
+  local -a _k=() _d=(); local i kw=0
+  while (( $# )); do _k+=("$1"); _d+=("$2"); shift 2; done
+  for ((i=0; i<${#_k[@]}; i++)); do
+    [[ ${_k[i]} == @RULE@ ]] && continue
+    strip_ansi "${_k[i]}"; (( ${#REPLY} > kw )) && kw=${#REPLY}
+  done
+  _out=()
+  for ((i=0; i<${#_k[@]}; i++)); do
+    [[ ${_k[i]} == @RULE@ ]] && { _out+=("@RULE@"); continue; }
+    strip_ansi "${_k[i]}"; local p=$(( kw - ${#REPLY} )); (( p<0 )) && p=0
+    _out+=("${_k[i]}$(printf '%*s' "$p" '')   ${_d[i]}")
+  done
+}
+
+# Pad $1 to $2 VISIBLE columns (ANSI + multibyte safe), result in REPLY.
+vpad() { strip_ansi "$1"; local n=$(( $2 - ${#REPLY} )); (( n<0 )) && n=0; printf -v REPLY '%s%*s' "$1" "$n" ''; }
+
+# Lay (key,desc) pairs from arrays named $2 (keys) and $3 (descs) into a TWO-COLUMN grid in the array named
+# $1 (column-major: first ceil(n/2) entries fill column 1 top-to-bottom, the rest column 2). Each column
+# sizes its OWN key/desc widths (so col 2's short keys don't inherit col 1's wide "Ctrl+arrows"), giving a
+# compact menu that trades plentiful WIDTH for scarce HEIGHT — half the rows of a single-column list.
+build_2col() {
+  local -n _o=$1 _k=$2 _v=$3
+  local n=${#_k[@]} i half kw1=0 vw1=0 kw2=0
+  half=$(( (n+1)/2 ))
+  for ((i=0;    i<half; i++)); do strip_ansi "${_k[i]}"; (( ${#REPLY}>kw1 )) && kw1=${#REPLY}; strip_ansi "${_v[i]}"; (( ${#REPLY}>vw1 )) && vw1=${#REPLY}; done
+  for ((i=half; i<n;    i++)); do strip_ansi "${_k[i]}"; (( ${#REPLY}>kw2 )) && kw2=${#REPLY}; done
+  _o=()
+  for ((i=0; i<half; i++)); do
+    local j=$(( i+half )) row
+    vpad "${_k[i]}" "$kw1"; row=$REPLY; vpad "${_v[i]}" "$vw1"; row+="  $REPLY"
+    if (( j<n )); then vpad "${_k[j]}" "$kw2"; row+="     $REPLY  ${_v[j]}"; fi   # 5-space gutter between the two columns
+    _o+=("$row")
+  done
+}
+
+# Print a self-contained block of pre-built lines flush in the TOP-LEFT CORNER (row 1, col 1), as one unit.
+# No centring or margins (the box's own border is the only frame) and NO trailing newline after the last line
+# — a block exactly ROWS tall would otherwise scroll the terminal up by one, pushing the top edge off-screen.
+block_place() {
+  local -a a=("$@"); local i out=''
+  (( ${#a[@]} > ROWS )) && a=("${a[@]:0:ROWS}")        # last-resort clamp (paging should already fit it)
+  for ((i=0; i<${#a[@]}; i++)); do (( i>0 )) && out+=$'\n'; out+=${a[i]}; done
+  printf '%s%s%s' "$CLR" "$HOME" "$out"
+}
+
+# Draw a phosphor-framed panel at the top-left. $1 = title (bright, centred in the top edge), rest = content
+# lines (ANSI ok; a line equal to "@RULE@" becomes an inner ├──┤ divider).
+#
+# Fits any window without wrapping/scrolling. WIDTH: pad 2->1->0, then clamp + `…`-truncate over-long lines.
+# HEIGHT: keep the box ONLY if everything fits one screen (no footer needed); otherwise drop the frame and
+# PAGINATE as a plain list, reserving the bottom row for an inverted "MORE" bar on every page but the last
+# (so a fitting menu has no dead space below it — "just show the MORE"). Renders global page OVP and sets the
+# page count OVPAGES (process_key reads it to know when the last page has been dismissed).
+overlay() {
+  local title=$1; shift
+  local -a content=("$@") screen=(); local line inner=0
+  strip_ansi "$title"; local tw=${#REPLY}
+  for line in "${content[@]}"; do [[ $line == @RULE@ ]] && continue; strip_ansi "$line"; (( ${#REPLY} > inner )) && inner=${#REPLY}; done
+  (( inner < tw+2 )) && inner=$(( tw+2 ))          # keep the title from overflowing the top edge
+  # --- fit WIDTH: pad 2->1->0, then clamp inner so the framed box fits COLS (over-long lines get clipped) ---
+  local pad=2
+  while (( pad>0 && inner+2*pad+2 > COLS )); do pad=$(( pad-1 )); done
+  (( inner+2*pad+2 > COLS )) && inner=$(( COLS-2*pad-2 )); (( inner<1 )) && inner=1
+  local cw=$(( inner+2*pad )); local outer=$(( cw+2 )) sp; printf -v sp '%*s' "$pad" ''
+  # --- fit HEIGHT: box if it all fits one screen (no footer), else frameless + paged with a 1-row MORE bar ---
+  local total=${#content[@]} framed=0 cap
+  (( ROWS >= 6 && 2 + total <= ROWS )) && framed=1
+  if (( framed )); then cap=$total; OVPAGES=1
+  else
+    # FRAMELESS list: drop @RULE@ dividers — they're decorative, and a separator wastes a precious row in a
+    # cramped list (without it the whole menu often fits one screen). Dividers are kept only in the boxed view.
+    local -a flat=(); for line in "${content[@]}"; do [[ $line == @RULE@ ]] || flat+=("$line"); done
+    content=("${flat[@]}"); total=${#content[@]}
+    if (( total <= ROWS )); then cap=$total; OVPAGES=1           # whole list now fits one frameless screen -> show it all, no MORE bar
+    else
+      cap=$(( ROWS - 1 )); (( cap<1 )) && cap=1                  # too tall: FILL each page (1 row reserved for the bottom MORE bar)
+      OVPAGES=$(( (total + cap - 1) / cap )); (( OVPAGES<1 )) && OVPAGES=1   # (no rebalance: every page but the last is full)
+    fi
+  fi
+  local page=$OVP; (( page>=OVPAGES )) && page=$(( OVPAGES-1 )); (( page<0 )) && page=0
+  local start=$(( page*cap )) i
+  clip_visible "$title" $(( cw>2 ? cw-2 : 1 )); title=$REPLY; strip_ansi "$title"; tw=${#REPLY}
+  if (( framed )); then
+    local fill=$(( cw-tw-2 )); (( fill<0 )) && fill=0; local lf=$(( fill/2 )); local rf=$(( fill-lf ))
+    screen+=("${A}┌$(hrule '─' "$lf") ${P}${BOLD}${title}${R}${A} $(hrule '─' "$rf")┐${R}")
+  fi
+  for ((i=start; i<start+cap && i<total; i++)); do
+    line=${content[i]}
+    if [[ $line == @RULE@ ]]; then
+      (( framed )) && screen+=("${A}├$(hrule '─' "$cw")┤${R}") || screen+=("${A}$(hrule '─' "$cw")${R}")
+      continue
+    fi
+    clip_visible "$line" "$inner"; line=$REPLY; strip_ansi "$line"; local p=$(( inner-${#REPLY} )); (( p<0 )) && p=0
+    local body; printf -v body '%s%s%*s%s' "$sp" "$line" "$p" '' "$sp"
+    (( framed )) && screen+=("${A}│${R}${body}${A}│${R}") || screen+=("$body")
+  done
+  if (( framed )); then
+    screen+=("${A}└$(hrule '─' "$cw")┘${R}")
+  elif (( OVPAGES>1 && page<OVPAGES-1 )); then
+    # MORE bar — a small inverted chip reading just "MORE", DOCKED at the very bottom row: pad the (possibly
+    # short, rebalanced) page with blank lines down to ROWS-1 so the bar lands on the last line, not floating
+    # right under the content. Only while more pages remain; the last/only page has none.
+    while (( ${#screen[@]} < ROWS-1 )); do screen+=(""); done
+    screen+=("${A}${BOLD}${REV} MORE ${R}")
+  fi
+  block_place "${screen[@]}"
+}
+
+# `?` — controls only (seed/stats moved to the `m` overlay), laid out as a compact TWO-COLUMN grid: movement
+# & pickups in column 1, stairs & meta-keys in column 2 (column-major, so each reads top-to-bottom).
+show_help() {
+  local -a K=() V=() rows
+  K+=("${P}h j k l${R}");     V+=("${D}move${R}")
+  K+=("${P}H J K L${R}");     V+=("${D}run ${A}·${R} ${P}Alt+arrows${R}")   # H J K L and Alt+arrows are the same `run` action
+  K+=("${P}Ctrl+arrows${R}"); V+=("${D}jump 10${R}")
+  K+=("${P}${TGOLD}${R}");          V+=("${D}collect gold${R}")
+  K+=("${STAR}${TSTAR}${R}");        V+=("${D}collect all stars${R}")
+  K+=("${GOLD}${TKEY}${R}");        V+=("${D}unlock the stairs${R}")
+  K+=("${SBG}${BOLD}${BLK}${TDOWN}${R}"); V+=("${D}descend${R}")
+  K+=("${BOLD}${A}${TUP}${R}");    V+=("${D}ascend${R}")
+  K+=("${P}r${R}");           V+=("${D}reroll floor${R}")
+  K+=("${P}m${R}");           V+=("${D}stats / score${R}")
+  K+=("${P}?${R}");           V+=("${D}this help${R}")
+  K+=("${P}c${R}");           V+=("${D}theme: custom / accent / green${R}")
+  K+=("${P}t${R}");           V+=("${D}tileset: default / DOS-Rogue${R}")
+  K+=("${P}q${R}");           V+=("${D}quit${R}")
+  build_2col rows K V
+  overlay "controls" "${rows[@]}"
+}
+
+# `m` — a fuller, on-demand view of the run than the top HUD bar, plus the floor SEED (which lives here now,
+# not in `?`). COMPACT: realm/floor/depth share one summary line and seed/map share another, so the panel is
+# short enough to stay boxed on small windows; the four progress rows in between are label/value-aligned.
+show_menu() {
+  local -a rows; local stars key seg lw=7 nsegs=${RSEGS[$CUR_REALM]:-1} mw mtxt
+  phase_mult; mw=$REPLY                                          # current phase's live efficiency multiplier (x100)
+  mtxt="${P}$(( mw/100 )).$(( (mw%100)/10 ))x${R}"               # shorthand, e.g. 245 -> 3.0x cap / 2.4x
+  if (( SEG_TGT>0 )); then stars="${P}${SEG_GOT}${D}/${P}${SEG_TGT}${R}"; else stars="${D}—${R}"; fi
+  # key row = the state of what the key unlocks (the segment's boss `>`): a simple bracketed [locked] until the
+  # key is grabbed, then [unlocked]. WHERE the key is and whether it's been picked up is the job of the ⚷
+  # tracker in the top HUD, not this row. Phosphor-green brackets, dim text inside.
+  if (( KEYTAKEN )); then key="${A}[${D}unlocked${A}]${R}"; else key="${A}[${D}locked${A}]${R}"; fi
+  seg="${P}$((SEG_IDX+1))${D}/${P}${nsegs}${R}"; (( IS_BOSS )) && seg+=" ${A}· ${P}boss${R}"; (( IS_EMPTY )) && seg+=" ${D}· empty${R}"
+  # Meta block (top): realm/floor/depth, score @ multiplier, segment · rooms, seed · map. Then a divider, then
+  # the COLLECTIBLE items (stars / key / gold) pinned at the BOTTOM. Score consolidates the old `· find stars`
+  # phase label into the compact `@ Mx` multiplier; segment + rooms now share one line; seed/map sits above the
+  # items so the items stay last. (In the frameless/cramped view the @RULE@ divider is dropped — see overlay.)
+  rows+=("${D}realm ${P}$((CUR_REALM+1))  ${A}·  ${D}floor ${P}$((CUR_FLOOR+1))  ${A}·  ${D}depth ${P}${depth}${R}")
+  rows+=("${D}score ${P}${SCORE} ${A}@ ${mtxt}")
+  rows+=("${D}segment ${seg}  ${A}·  ${D}rooms ${P}${roomsseen}${D}/${P}${NROOMS}${R}")
+  rows+=("${D}seed ${P}${seedhash}  ${A}·  ${D}map ${P}${W}${D}x${P}${H}${R}")
+  rows+=("@RULE@")
+  vpad "${STAR}${TSTAR}${R} ${D}stars${R}" "$lw"; rows+=("$REPLY  ${stars}")
+  vpad "${GOLD}${TKEY}${R} ${D}key${R}"   "$lw"; rows+=("$REPLY  ${key}")
+  local gv="${D}"; (( gold>0 )) && gv="${GOLD}"   # gold amount in amber once you hold any, dim at zero — matches the HUD
+  vpad "${P}${TGOLD}${R} ${D}gold${R}"    "$lw"; rows+=("$REPLY  ${gv}${gold}${R}")
+  overlay "status" "${rows[@]}"
+}
+
+# --- world: persistent realms x floors ---------------------------------------
+# A floor is fully determined by (mapseed, W, H), so we don't store its big arrays — only a tiny per-floor
+# overlay keyed "realm,floor": the seed, fog set, collected gold+stars, rooms-seen set, plan, and depth.
+# Switching a floor reseeds + regenerates the exact layout, then re-applies the overlay. Segment progress and
+# key state live in per-segment caches (WSEGGOT/WSEGKEY); realm shape (segment count/targets) in RSEGS/RTGT.
+# A realm's length is BOSS-driven, not fixed: you descend floor by floor until a segment's boss `>` (unlocked
+# by collecting that segment's stars) and, at the LAST segment's boss, roll into a fresh next realm. Stairs are
+# paired: up-stairs `<` on the start cell; descending lands on the next floor's `<`, ascending on the previous
+# floor's `>` (RLASTF remembers a realm's last floor so an upward realm crossing lands right) — reversible.
+
+# Save the CURRENT floor's mutable overlay (fog / collected gold+stars / rooms seen / depth) into the cache.
+# The key lifecycle is SEGMENT-scoped now (WSEGGOT / WSEGKEY, written as you collect), not per floor.
+save_floor_state() {
+  local i key="$CUR_REALM,$CUR_FLOOR" fog="" objseen="" seen=""
+  for ((i=0; i<W*H; i++)); do (( DISC[i] )) && fog+="$i "; (( OBJSEEN[i] )) && objseen+="$i "; done
+  WFOG[$key]=$fog
+  WOBJSEEN[$key]=$objseen
+  WGOLD[$key]="${!GOLDGONE[*]}"
+  WSTAR[$key]="${!STARGONE[*]}"
+  WDEPTH[$key]=$depth
+  for i in "${!ROOMSEEN[@]}"; do seen+="$i "; done
+  WSEEN[$key]=$seen
+}
+
+# wall_gap r c — true if every one of (r,c)'s 8 neighbours is in-bounds and not a wall `#` (a 1-tile gap
+# from walls; floor / object neighbours are fine). Keeps the hero's stair-landing off the walls.
+wall_gap() {
+  local r=$1 c=$2 rr cc
+  for ((rr=r-1; rr<=r+1; rr++)); do
+    (( rr<0 || rr>=H )) && return 1
+    for ((cc=c-1; cc<=c+1; cc++)); do
+      (( cc<0 || cc>=W )) && return 1
+      (( rr==r && cc==c )) && continue
+      [[ ${TILE[rr*W+cc]} == '#' ]] && return 1
+    done
+  done
+  return 0
+}
+
+# Place the hero on a RANDOM walkable tile in the stair's room. PREFERS a fully-spaced cell — the same
+# `obj_ok` rule as object placement: floor `·` with a 1-tile gap from walls AND from every object (stairs,
+# gold, star, key) — so the hero isn't dropped flush against a wall or right next to an item. Graceful
+# degradation if a tight room has none: off-walls + 2-gap-from-stair (`wall_gap`) -> any 2-gap-from-stair
+# floor -> an adjacent `·` -> staying put. Uses SRANDOM (not RANDOM) so the spot is FRESH on every arrival —
+# bouncing up/down between two floors drops you somewhere new — while the layout stays deterministic
+# (generate reseeds RANDOM, which SRANDOM leaves untouched).
+nudge_off_stair() {
+  local sr=$1 sc=$2 i r c rm dr dc cheb nr nc; local -a cand=() candw=() cando=()
+  rm=-1                                            # which room holds the stair
+  for ((i=0; i<NROOMS; i++)); do
+    (( sr>=ROOMy[i] && sr<ROOMy[i]+ROOMh[i] && sc>=ROOMx[i] && sc<ROOMx[i]+ROOMw[i] )) && { rm=$i; break; }
+  done
+  if (( rm>=0 )); then
+    for ((r=ROOMy[rm]; r<ROOMy[rm]+ROOMh[rm]; r++)); do for ((c=ROOMx[rm]; c<ROOMx[rm]+ROOMw[rm]; c++)); do
+      [[ ${TILE[r*W+c]} == '·' ]] || continue      # floor only -> excludes the stair AND gold `$`
+      dr=$(( r>sr?r-sr:sr-r )); dc=$(( c>sc?c-sc:sc-c )); cheb=$(( dr>dc?dr:dc ))
+      (( cheb>=2 )) || continue                    # keep a 1-tile gap from the stair
+      cand+=( "$r $c" )
+      if obj_ok "$r" "$c"; then cando+=( "$r $c" )  # BEST: 1-tile gap from walls AND every object
+      elif wall_gap "$r" "$c"; then candw+=( "$r $c" ); fi   # next best: at least off the walls
+    done; done
+  fi
+  if (( ${#cando[@]} )); then read -r pr pc <<< "${cando[SRANDOM % ${#cando[@]}]}"; return; fi
+  if (( ${#candw[@]} )); then read -r pr pc <<< "${candw[SRANDOM % ${#candw[@]}]}"; return; fi
+  if (( ${#cand[@]} )); then read -r pr pc <<< "${cand[SRANDOM % ${#cand[@]}]}"; return; fi
+  local drs=(0 0 1 -1 1 1 -1 -1) dcs=(1 -1 0 0 1 -1 1 -1)   # too tight for a gap -> any adjacent floor cell
+  for ((i=0; i<8; i++)); do
+    nr=$(( sr+drs[i] )); nc=$(( sc+dcs[i] ))
+    (( nr<0||nr>=H||nc<0||nc>=W )) && continue
+    [[ ${TILE[nr*W+nc]} == '·' ]] && { pr=$nr; pc=$nc; return; }
+  done
+  pr=$sr; pc=$sc
+}
+
+# Load (realm,floor) into the active globals. dir: down/start -> arrive on this floor's `<` (room 0 centre);
+# up -> arrive on this floor's `>` (the down-stairs we are climbing back to).
+load_floor() {
+  local realm=$1 floor=$2 dir=$3 wantdepth=${4:-1} key="$1,$2" fresh=1 i idx segkey
+  CUR_REALM=$realm; CUR_FLOOR=$floor
+  [[ -n ${WSEED[$key]:-} ]] && fresh=0
+  (( ! fresh )) && RT_SEED=${WSEED[$key]}             # revisit -> regenerate the identical layout
+  generate                                            # builds layout + runs plan_this_floor (sets SEG_IDX/SEG_TGT/IS_BOSS/IS_EMPTY)
+  TOLLPHASE=0                                          # fresh hall-monitor conversation on every arrival (re-greet on revisit)
+  WSEED[$key]=$mapseed                                # capture (fresh) or re-confirm (revisit)
+  depth=${WDEPTH[$key]:-$wantdepth}; WDEPTH[$key]=$depth      # absolute floor number (drives gold scaling + HUD); cached so revisits match
+  if (( realm==0 && floor==0 )); then UPSTAIRR=-1; UPSTAIRC=-1     # top of the world: no way up
+  else UPSTAIRR=$pr; UPSTAIRC=$pc; TILE[pr*W+pc]='<'; fi           # up-stairs on the start cell (room 0 centre)
+  GOLDGONE=(); STARGONE=()
+  segkey="$CUR_REALM,$SEG_IDX"
+  SEG_GOT=${WSEGGOT[$segkey]:-0}                                   # stars collected in this SEGMENT so far (across its floors)
+  read -r KEYSPAWNED KEYFLOOR KEYIDX KEYTAKEN <<< "${WSEGKEY[$segkey]:-0 -1 -1 0}"   # this segment's key lifecycle
+  if (( ! fresh )); then                              # re-apply the saved overlay
+    for idx in ${WGOLD[$key]:-};  do GOLDGONE[idx]=1; TILE[idx]='·'; done           # collected gold stays gone
+    for idx in ${WSTAR[$key]:-};  do STARGONE[idx]=1; TILE[idx]='·'; done           # collected stars too (segment total is in WSEGGOT)
+    ROOMSEEN=(); roomsseen=0
+    for i   in ${WSEEN[$key]:-};  do ROOMSEEN[i]=1; roomsseen=$(( roomsseen+1 )); done
+    for ((i=0;i<W*H;i++)); do DISC[i]=0; done
+    for idx in ${WFOG[$key]:-};     do DISC[idx]=1; done                            # restore explored fog
+    for idx in ${WOBJSEEN[$key]:-}; do OBJSEEN[idx]=1; done                         # restore where the torch had swept (dark mode)
+  fi
+  if [[ $dir == up ]]; then pr=$STAIRR; pc=$STAIRC    # came back up -> arrive at the `>` we'd descend through
+  else pr=$STARTR; pc=$STARTC; fi                     # descended / start -> the `<` cell (room 0 centre, or a hall's left end)
+  # Don't let the hero stand ON the stair he arrived at -> step him one tile off so the `@` doesn't
+  # cover the glyph. Only nudges when the arrival cell is actually a stair (realm0/floor0 start has none).
+  # On a HALL (empty floor) step one tile INWARD toward the far stair, so you start at the entrance door and
+  # walk the corridor across; on a normal floor use the spaced random nudge.
+  if [[ ${TILE[pr*W+pc]} == '<' || ${TILE[pr*W+pc]} == '>' ]]; then
+    if (( IS_EMPTY )); then
+      if [[ $dir == up ]]; then pc=$(( pc-1 )); else pc=$(( pc+1 )); fi   # step inward toward the far stair
+    else nudge_off_stair "$pr" "$pc"; fi
+  fi
+  # Key handling AFTER the arrival cell is final (so place_key_cell can avoid the hero). If the segment is
+  # already complete but the key never got a floor (defensive), pick one now; then, if this IS the key's floor,
+  # make sure its glyph is on the map. The key can be on ANY of the segment's floors, not just the boss.
+  (( SEG_GOT>=SEG_TGT && ! KEYSPAWNED && ! KEYTAKEN )) && spawn_key
+  ensure_key_glyph
+  (( HARD )) && light_map                             # dark mode: compute the stairs/money glow for this floor
+  cur_room=-1; reveal                                 # light the arrival area (merges with restored fog)
+}
+
+# Step onto down-stairs: save here, descend. Realm length is BOSS-driven now: a non-boss `>` and a non-final
+# boss `>` just go to the next floor of this realm; descending the FINAL segment's boss `>` rolls into a fresh
+# next realm (and records this realm's last floor index so ascending back lands correctly).
+descend() {
+  save_floor_state
+  local nr=$CUR_REALM nf=$(( CUR_FLOOR+1 )) nd=$(( depth+1 ))
+  if (( IS_BOSS && SEG_IDX==${RSEGS[$CUR_REALM]}-1 )); then        # final boss of the realm -> next realm
+    RLASTF[$CUR_REALM]=$CUR_FLOOR
+    nr=$(( CUR_REALM+1 )); nf=0
+  fi
+  load_floor "$nr" "$nf" down "$nd"
+}
+
+# Step onto up-stairs: save here, move to the previous floor (back into the previous realm past floor 0, landing
+# on that realm's recorded last floor).
+ascend() {
+  (( UPSTAIRR<0 )) && return                                       # top of the world: nothing above
+  save_floor_state
+  local prm=$CUR_REALM pf=$(( CUR_FLOOR-1 )) pd=$(( depth-1 ))
+  (( pf<0 )) && { prm=$(( CUR_REALM-1 )); pf=${RLASTF[$prm]:-0}; }
+  load_floor "$prm" "$pf" up "$pd"
+}
+
+# `r` -> reroll the CURRENT floor with a fresh layout (same depth). Drops its cached overlay/plan, un-counts any
+# stars collected here from the segment total, and invalidates deeper floors of this realm (their cached plans
+# were derived from this floor). Resets the segment's key + floor-range so they re-derive cleanly (the key can
+# live on any of the segment's floors now, so a reroll can't leave it stranded on an orphaned one).
+reroll() {
+  local key="$CUR_REALM,$CUR_FLOOR" segkey="$CUR_REALM,$SEG_IDX" got=0 f
+  got=$(( ${#STARGONE[@]} ))                                       # stars collected on THIS floor -> remove from the segment tally
+  WSEGGOT[$segkey]=$(( ${WSEGGOT[$segkey]:-0} - got )); (( WSEGGOT[$segkey]<0 )) && WSEGGOT[$segkey]=0
+  unset "WSEGKEY[$segkey]" "WSEGLO[$segkey]" "WSEGHI[$segkey]"     # key + segment range re-derive as the segment is replayed
+  for f in "${!WSEED[@]}"; do [[ $f == $CUR_REALM,* ]] && (( ${f#*,} > CUR_FLOOR )) && \
+    unset "WSEED[$f]" "WFOG[$f]" "WOBJSEEN[$f]" "WGOLD[$f]" "WSEEN[$f]" "WSTAR[$f]" "WPLAN[$f]" "WDEPTH[$f]"; done
+  unset "WSEED[$key]" "WFOG[$key]" "WOBJSEEN[$key]" "WGOLD[$key]" "WSEEN[$key]" "WSTAR[$key]" "WPLAN[$key]" "WDEPTH[$key]"
+  load_floor "$CUR_REALM" "$CUR_FLOOR" start "$depth"
+}
+
+# --- input + redraw plumbing -------------------------------------------------
+# read_key TIMEOUT: assemble ONE full keystroke into $key — CSI (\e[…X), SS3 (\eOX), Alt-meta (\e\e…),
+# or a lone ESC. Returns 0 if a key was read, 1 on timeout.
+read_key() {
+  local rest
+  read -rsn1 -t "$1" key 2>/dev/null || return 1
+  if [[ $key == $'\e' ]]; then
+    read -rsn1 -t 0.02 rest 2>/dev/null && key+="$rest"
+    [[ $rest == $'\e' ]] && { read -rsn1 -t 0.02 rest 2>/dev/null && key+="$rest"; }   # Alt may prefix a 2nd ESC
+    if [[ $rest == '[' ]]; then          # CSI -> read up to a final byte so Alt/Ctrl+arrows (\e[1;3A / \e[1;5A) parse whole
+      while read -rsn1 -t 0.02 rest 2>/dev/null; do key+="$rest"; [[ $rest == [a-zA-Z~] ]] && break; done
+    elif [[ $rest == 'O' ]]; then        # SS3 (application cursor mode) -> one direction byte
+      read -rsn1 -t 0.02 rest 2>/dev/null && key+="$rest"
+    fi
+  fi
+  return 0
+}
+
+# Single step with dirty-rect tracking. A step that stays in the same room/corridor (cur_room
+# unchanged, no descend) only dirties the union of its old+new 3x3 flashlight boxes -> fast path.
+# Entering/leaving a room or descending changes too much -> mark a full redraw.
+move_step() {
+  local or=$pr oc=$pc ocr=$cur_room od=$depth og=$gold os=$SEG_GOT
+  try_move "$1" "$2"
+  if (( EVENT )); then EVENT=0; REDRAW=2; return; fi                # key spawned/taken, locked-stair bump -> full render (shows bar msg)
+  # Full render on a descend / room change, OR when the HUD bar's own values changed (gold or star count) so the
+  # tracker/GOLD update immediately — the dirty-rect path repaints only map cells, never row 1. This MUST come
+  # before the "didn't move" check below: a descend/ascend relocates you to the new floor and can land you on
+  # the SAME (row,col) you left from, which would otherwise look like a blocked bump and skip the full repaint
+  # (leaving the previous floor on screen until later moves redraw over it).
+  if (( depth!=od || cur_room!=ocr || gold!=og || SEG_GOT!=os )); then REDRAW=2; return; fi
+  (( pr==or && pc==oc )) && return                                 # blocked by a wall -> no turn taken (monitor doesn't pace)
+  pace_monitor                                                     # the hall monitor takes his step when you take yours
+  (( MON_MOVED )) && { dirty_box "$MON_OR" "$MON_OC" "$MON_OR" "$MON_OC"; dirty_box "$MON_NR" "$MON_NC" "$MON_NR" "$MON_NC"; }
+  (( REDRAW<1 )) && REDRAW=1                                        # dirty (don't downgrade a full queued earlier this batch)
+  dirty_box $((or-1)) $((oc-1)) $((or+1)) $((oc+1))
+  dirty_box $((pr-1)) $((pc-1)) $((pr+1)) $((pc+1))
+}
+
+# Act on $key. Sets REDRAW (0 none / 1 dirty / 2 full) and QUIT. Movement uses move_step (dirty path);
+# run/jump/new-map are full; the help/stats overlays draw themselves (paginated) and leave REDRAW=0.
+process_key() {
+  # An overlay (OV=help|menu) is open: q/Esc closes it; any other key pages forward, closing after the last
+  # page. show_* re-renders the new page (OVP) and leaves REDRAW=0 so the map underneath isn't repainted.
+  if [[ -n $OV ]]; then
+    case "$key" in
+      q|Q|$'\e') OV='' ; REDRAW=2 ;;
+      $'\e[I')   (( mode )) && { set_palette; "show_$OV"; } ;;   # refocused -> re-ride the (maybe changed) theme, redraw the overlay; don't page
+      $'\e[O')   ;;                                              # focus lost -> ignore (not a page key)
+      *) OVP=$(( OVP+1 ))
+         if (( OVP >= OVPAGES )); then OV=''; REDRAW=2; else "show_$OV"; fi ;;
+    esac
+    return
+  fi
+  [[ -n $BARMSG ]] && { BARMSG=''; STICKYMSG=0; REDRAW=2; }   # any next key clears a transient bar message — sticky monitor message included (full render reverts the bar)
+  case "$key" in
+    q|Q)                     QUIT=1 ;;
+    $'\e[I')                 (( mode )) && { set_palette; REDRAW=2; } ;;   # window refocused -> re-query the theme (catches a scheme change made while away); custom mode is theme-independent
+    $'\e[O')                 ;;   # focus lost -> ignore
+    '?')                     OV=help; OVP=0; show_help ;;
+    m|M)                     OV=menu; OVP=0; show_menu ;;
+    r|R)                     reroll; REDRAW=2 ;;
+    c|C)                     mode=$(((mode+1)%3))
+                             # Lift the forced bg/fg FIRST (ride) or re-force green-on-black (custom), THEN build the
+                             # palette: set_palette queries the LIVE bg (OSC 11) to anchor the ride ramp's contrast,
+                             # so the bg must already be the theme default by the time it asks.
+                             if (( mode )); then printf '%s%s' "$FGOFF" "$BGOFF"; else printf '%s%s' "$FGON" "$BGON"; fi
+                             set_palette
+                             REDRAW=2 ;;
+    t|T)                     tmode=$(( (tmode+1)%2 )); set_tiles; REDRAW=2 ;;   # toggle the tileset: default <-> DOS/Epyx Rogue (per-session)
+    h|$'\e[D'|$'\eOD')       move_step 0 -1 ;;   # single step
+    l|$'\e[C'|$'\eOC')       move_step 0 1 ;;
+    k|$'\e[A'|$'\eOA')       move_step -1 0 ;;
+    j|$'\e[B'|$'\eOB')       move_step 1 0 ;;
+    H|$'\e[1;3D'|$'\e\e[D')  run 0 -1; REDRAW=2 ;;   # Alt+move (or H J K L) = run/travel (next junction/room/wall)
+    L|$'\e[1;3C'|$'\e\e[C')  run 0 1;  REDRAW=2 ;;
+    K|$'\e[1;3A'|$'\e\e[A')  run -1 0; REDRAW=2 ;;
+    J|$'\e[1;3B'|$'\e\e[B')  run 1 0;  REDRAW=2 ;;
+    $'\e[1;5D')              jump 0 -1; REDRAW=2 ;;   # Ctrl+arrow = a fixed 10-tile jump
+    $'\e[1;5C')              jump 0 1;  REDRAW=2 ;;
+    $'\e[1;5A')              jump -1 0; REDRAW=2 ;;
+    $'\e[1;5B')              jump 1 0;  REDRAW=2 ;;
+  esac
+}
+
+# Force a clean full repaint (clear + redraw). Used on resize; reusable hook for future floor switches.
+redraw_all() { printf '%s' "$CLR"; render; }
+
+# Flash the down-stairs cell red<->green a couple times — bump feedback when the player walks into a locked
+# `>` (floor not cleared yet). Writes straight to that one cell via cursor addressing (map cell (r,c) ->
+# terminal row r+2, col c+GUTTER+1, matching paint_dirty), and LEAVES it green (its resting colour). Uses
+# `sleep` (not a key-timeout) so a held direction key isn't swallowed during the pulse.
+flash_stair() {
+  local tr=$(( STAIRR+2 )) tc=$(( STAIRC+GUTTER+1 ))
+  (( STAIRR<0 )) && return
+  printf '\e[%d;%dH%s%s%s%s%s' "$tr" "$tc" "$SBGL" "$BOLD" "$BLK" "$TDOWN" "$R"   # ONE long RED flash...
+  sleep 0.3
+  printf '\e[%d;%dH%s%s%s%s%s' "$tr" "$tc" "$SBG" "$BOLD" "$BLK" "$TDOWN" "$R"    # ...then back to GREEN (resting)
+}
+
+# --- main loop (turn-based: redraw only on input / resize) ---
+OV=''; OVP=0; OVPAGES=1; resized=0; gold=0; QUIT=0; REDRAW=0   # OV = open overlay (''|help|menu); OVP = its page; OVPAGES set by overlay()
+BARMSG=''; EVENT=0; FLASH=0; STICKYMSG=0      # transient status-bar message + "something changed beyond the step" flag + locked-stair bump flash; STICKYMSG=1 keeps a message up with no auto-clear (hall monitor)
+MSGTICKS=0; MSG_DUR_TICKS=10                  # bar-message auto-clear: 10 idle ticks while a message is up (poll drops to 0.075s then) -> ~750ms on screen
+KEYSPAWNED=0; KEYFLOOR=-1; KEYIDX=-1; KEYTAKEN=0
+SEG_IDX=0; SEG_TGT=0; SEG_GOT=0; IS_BOSS=0; IS_EMPTY=0; STARS_HERE=0; IS_FIRST_HALL=0   # current floor's segment role (set by plan_this_floor)
+TOLLON=0; TOLLR=-1; TOLLC=-1; TOLLAMT=0; TOLLPHASE=0   # current floor's hall-monitor toll (set by place_monitor); TOLLPHASE = bump-conversation stage (0 greet / 1 pay-or-pass / 2 just-paid), reset per floor in load_floor
+TOLL_LO=0; TOLL_HI=-1; TOLL_DIR=1; MON_MOVED=0; MON_OR=0; MON_OC=0; MON_NR=0; MON_NC=0   # monitor patrol bounds + direction (set by place_monitor); MON_* = his moved cells for the single-step dirty repaint (pace_monitor)
+# WSEED/WFOG/WGOLD/WSEEN/WSTAR/WPLAN/WDEPTH (per floor) + RSEGS/RTGT/RLASTF/WSEGGOT/WSEGKEY (per realm/segment)
+# are declared associative up near generate() so the harness/sim get string-key semantics; nothing to redo here.
+declare -a GOLDGONE STARGONE OBJSEEN LIGHTMAP GOLDVAL BOXMAP   # collected gold/star cells; torch-swept cells (dark mode); stairs/money/key glow map; per-cell gold value; box-wall glyph cache
+HARD=1                                          # dark mode is ALWAYS on now (the torch IS the game; a future shop sells light) — no toggle
+SCORE=0; PHASE=1; PH_STEPS=0; PH_NEW=0          # efficiency score; current phase (1=find stars, 2=find key) + its step/new-ground tally
+CUR_REALM=0; CUR_FLOOR=0; depth=1
+trap 'resized=1' WINCH
+read_size
+load_floor 0 0 start 1                        # build & enter realm 0 floor 0 (the top of the world: no up-stairs)
+STTY_SAVE=$(stty -g </dev/tty 2>/dev/null)   # save tty mode (restored in cleanup)
+stty -echo -icanon </dev/tty 2>/dev/null     # no echo + char-at-a-time: arrow seqs arriving mid-render can't leak as text
+printf '%s%s%s%s%s' "$FGON" "$BGON" "$HIDE" "$FOCUSON" "$CLR"
+render
+
+while :; do
+  msgto=0.3; [[ -n $BARMSG ]] && (( ! STICKYMSG )) && msgto=0.075   # while a NON-sticky message is up, poll at 0.075s so it auto-clears at ~750ms (10 ticks); a sticky (monitor) message stays, so idle-poll at 0.3s
+  if read_key "$msgto"; then
+    REDRAW=0; EVENT=0; FLASH=0; DRr0=$H; DRc0=$W; DRr1=-1; DRc1=-1     # reset this batch's redraw decision + dirty-rect + flash
+    process_key
+    (( QUIT )) && exit 0
+    # COALESCE: a held key auto-repeats faster than a big-window full render; drain any already-buffered
+    # keystrokes and apply them all, then paint ONCE (bounds the backlog / @-overshoot). A tiny non-zero
+    # timeout actually CONSUMES a waiting key — `read -t 0` only *tests* availability, it doesn't read.
+    if [[ -z $OV ]]; then
+      while read_key 0.005; do
+        process_key
+        (( QUIT )) && exit 0
+        [[ -n $OV ]] && break
+      done
+    fi
+    case $REDRAW in
+      2) render ;;          # full render (room change, descend, run/jump, new map, help-close)
+      1) paint_dirty ;;     # dirty-rect fast path (single steps within a room/corridor)
+    esac
+    (( FLASH )) && flash_stair    # bumped a locked down-stair this batch -> pulse it red (after the render that drew it green + the LOCKED message)
+    if [[ -n $BARMSG ]] && (( ! STICKYMSG )); then MSGTICKS=$MSG_DUR_TICKS; else MSGTICKS=0; fi   # arm/disarm the auto-clear timer (sticky monitor messages never arm it)
+  elif [[ -n $BARMSG ]] && (( ! STICKYMSG )) && (( --MSGTICKS <= 0 )); then
+    BARMSG=''; render            # NON-sticky message timed out with no input -> clear it, restore the HUD (a keypress would've cleared it too, via process_key)
+  fi
+  # Resize changes W/H, which invalidates every cached layout (positions move) AND shifts where segment
+  # boundaries fall (room counts change). Since a floor's segment role is chain-derived from the floors above,
+  # we can't just rebuild one floor — we re-derive the whole descent at the new size from realm 0, walking down
+  # to the SAME DEPTH (the stable coordinate across a resize). Realm plans (RSEGS/RTGT) are size-independent so
+  # they survive; per-floor fog and the current segment's collected progress are lost (as before).
+  if (( resized )); then
+    resized=0; read_size; RESIZE_TD=$depth; BARMSG=''; STICKYMSG=0   # drop any sticky monitor message: the floor is about to be rebuilt
+    WSEED=(); WFOG=(); WOBJSEEN=(); WGOLD=(); WSEEN=(); WSTAR=(); WPLAN=(); WDEPTH=(); WSEGGOT=(); WSEGKEY=(); WSEGLO=(); WSEGHI=(); RLASTF=(); WFGOLD=(); WHASMON=(); WHALLELIG=()   # WTOLLPAID kept: paid tolls stay paid across a resize
+    PVIS=(); PH_STEPS=0; PH_NEW=0; PHASE=1        # current segment's progress is lost on resize -> restart its scoring phase (banked SCORE kept)
+    CUR_REALM=0; CUR_FLOOR=0; depth=1
+    load_floor 0 0 start 1
+    while (( depth < RESIZE_TD )); do descend; done    # follow the canonical descent down to the pre-resize depth
+    redraw_all
+  fi
+done

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Make platform_profile writable by the 'video' group (for gpu-profile / GPU Profile menu).
+PP=/sys/firmware/acpi/platform_profile
+[ -e "$PP" ] && { chgrp video "$PP" 2>/dev/null || true; chmod g+w "$PP" 2>/dev/null || true; }
+exit 0

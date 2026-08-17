@@ -1,0 +1,15 @@
+# kosetup core packages — Arch names
+git
+curl
+jq
+fzf
+ripgrep
+fd
+bat
+eza
+lazygit
+nnn
+tmux
+neovim
+ctags
+base-devel

@@ -1,0 +1,31 @@
+# kosetup git config — wired in via `git config --global include.path` by install.sh.
+# Identity ([user] name/email) stays per-machine in ~/.gitconfig itself.
+
+# Work identity override for work-repo dirs (create ~/.gitconfig.work with the
+# work [user] block on work machines; silently ignored when the file is absent).
+# Both layouts matched: ~/rpc/repo/ (old Devuan box) and ~/Work/rpc/ (omarchy).
+[includeIf "gitdir:~/rpc/repo/"]
+	path = ~/.gitconfig.work
+[includeIf "gitdir:~/Work/rpc/"]
+	path = ~/.gitconfig.work
+
+[core]
+	autocrlf = false
+
+[pull]
+	rebase = false
+
+[merge]
+	tool = diffview
+[mergetool "diffview"]
+	cmd = nvim -n -c "DiffviewOpen" "$MERGE"
+	trustExitCode = true
+
+[alias]
+	st = status
+	co = checkout
+	br = branch
+	ci = commit
+	lg = log --graph --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset)%C(auto)%d%C(reset)' --all
+	lg2 = log --graph --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset) %C(bold green)- %an%C(reset) %C(dim bold green)(%ar)%C(reset)%C(auto)%d%C(reset)' --all
+	lgf = diff-tree --no-commit-id --name-only -r

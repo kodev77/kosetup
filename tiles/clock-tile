@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# clock — big-digit terminal clock (HH:MM, 24h, centered), a dashboard tile like sys-tile/snake-tile.
+# Matrix Vivid phosphor green by default; the 'c' key CYCLES the theme (custom -> ride-accent -> ride-green)
+# exactly like the other tiles. 'q' quits. Re-centres on resize (size is read each tick).
+#
+# (Replaces the old tty-clock wrapper: a compiled binary can't take a 'c' keybind. The legacy phosphor
+#  build is still on disk as clock-bin if you ever want the tty-clock renderer.)
+set -u
+export LC_NUMERIC=C
+
+R=$'\e[0m'; HIDE=$'\e[?25l'; SHOW=$'\e[?25h'; HOME=$'\e[H'; EOL=$'\e[K'; CLR=$'\e[2J'; CLREOS=$'\e[J'
+# OSC: custom mode forces the Matrix Vivid base (green-on-black) so it doesn't sit on the preset's bg;
+# ride modes lift it (reset to the terminal default) so the clock follows the active preset. Reset on exit.
+BGON=$'\e]11;#000000\a'; FGON=$'\e]10;#33ff33\a'; BGOFF=$'\e]111\a'; FGOFF=$'\e]110\a'
+mode=0   # theme: 0 custom truecolor green · 1 ride-accent (blue slot = scheme signature) · 2 ride-green. 'c' cycles.
+fmt=0    # time format: 0 = 12-hour (default) · 1 = 24-hour. 'h' toggles.
+help=0   # '?' shows the keybind overlay; any key closes it.
+set_palette() {   # C = the lit-digit colour (one tier — a clock is a single colour)
+  case $mode in
+    1) C=$'\e[1;94m' ;;                 # ride-accent: bright blue slot (purple on Dracula, blue on Win95/GitHub)
+    2) C=$'\e[1;92m' ;;                 # ride-green: bright green slot (phosphor feel)
+    *) C=$'\e[38;2;51;255;51m' ;;       # custom: Matrix Vivid phosphor #33ff33
+  esac
+  if (( mode )); then printf '%s%s' "$FGOFF" "$BGOFF"   # ride: follow the terminal preset (lift forced bg/fg)
+  else printf '%s%s' "$FGON" "$BGON"; fi                 # custom: force Matrix Vivid green-on-black
+}
+set_palette
+
+cleanup() { printf '%s%s%s%s%s%s' "$R" "$FGOFF" "$BGOFF" "$CLR" "$HOME" "$SHOW"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
+
+# 3x5 block font (5 rows; '1' = lit pixel). Each pixel renders 2 chars wide (██) so digits look square.
+declare -A FONT=(
+  [0]="111 101 101 101 111" [1]="001 001 001 001 001" [2]="111 001 111 100 111"
+  [3]="111 001 111 001 111" [4]="101 101 111 001 001" [5]="111 100 111 001 111"
+  [6]="111 100 111 101 111" [7]="111 001 001 001 001" [8]="111 101 111 101 111"
+  [9]="111 101 111 001 111" [':']="0 1 0 1 0" [' ']="000 000 000 000 000"
+)
+
+strip_ansi() { local s=$1 re=$'\e\[[0-9;?]*[a-zA-Z]'; while [[ $s =~ $re ]]; do s=${s//"${BASH_REMATCH[0]}"/}; done; REPLY=$s; }
+
+render() {
+  local t                                        # bash builtin time — no `date` fork
+  if (( fmt )); then printf -v t '%(%H:%M)T' -1   # 24h: 13:42
+  else printf -v t '%(%l:%M)T' -1; fi             # 12h (default): " 1:42" — space-padded, blank glyph keeps it monospace
+  local -a rows=("" "" "" "" "")
+  local i ch r b bits px
+  for ((i=0; i<${#t}; i++)); do
+    ch=${t:i:1}; local -a g=(${FONT[$ch]})
+    local gap=" "; [[ $ch == ':' || ${t:i+1:1} == ':' ]] && gap="  "   # 1 char between digits, 2 around the colon (tty-clock)
+    for ((r=0; r<5; r++)); do
+      bits=${g[r]}; px=""
+      for ((b=0; b<${#bits}; b++)); do [[ ${bits:b:1} == 1 ]] && px+="${C}██${R}" || px+="  "; done
+      rows[r]+="$px$gap"
+    done
+  done
+  local cols lines top left
+  if ! read -r lines cols < <(stty size </dev/tty 2>/dev/null); then lines=24; cols=80; fi
+  strip_ansi "${rows[0]}"; local w=${#REPLY}
+  left=$(( (cols - w) / 2 )); (( left < 0 )) && left=0
+  top=$(( (lines - 5) / 2 )); (( top < 0 )) && top=0
+  local pad; printf -v pad '%*s' "$left" ''
+  printf '%s' "$HOME"
+  for ((i=0; i<top; i++)); do printf '%s\n' "$EOL"; done
+  for r in 0 1 2 3 4; do printf '%s%s%s\n' "$pad" "${rows[r]}" "$EOL"; done
+  printf '%s' "$CLREOS"
+}
+
+render_help() {   # centered keybind overlay (any key closes it)
+  local -a L=("clock-tile" "" "c   cycle theme (custom / accent / green)" "h   12 / 24 hour" \
+              "?   this help" "q   quit" "" "press any key to close")
+  local cols lines top left maxw=0 i pad
+  if ! read -r lines cols < <(stty size </dev/tty 2>/dev/null); then lines=24; cols=80; fi
+  for i in "${L[@]}"; do (( ${#i} > maxw )) && maxw=${#i}; done
+  left=$(( (cols - maxw) / 2 )); (( left < 0 )) && left=0
+  top=$(( (lines - ${#L[@]}) / 2 )); (( top < 0 )) && top=0
+  printf -v pad '%*s' "$left" ''
+  printf '%s' "$HOME"
+  for ((i=0; i<top; i++)); do printf '%s\n' "$EOL"; done
+  for i in "${L[@]}"; do printf '%s%s%s%s%s\n' "$pad" "$C" "$i" "$R" "$EOL"; done
+  printf '%s' "$CLREOS"
+}
+
+printf '%s%s' "$HIDE" "$CLR"
+while :; do
+  if (( help )); then render_help; else render; fi
+  if read -rsn1 -t 1 key 2>/dev/null; then
+    if (( help )); then help=0                          # any key closes the help overlay
+    else
+      case "$key" in
+        q|Q) exit 0 ;;
+        c|C) mode=$(( (mode + 1) % 3 )); set_palette ;;  # cycle: custom -> ride-accent -> ride-green
+        h|H) fmt=$(( fmt ^ 1 )) ;;                        # toggle 12-hour <-> 24-hour
+        '?') help=1 ;;                                    # show keybind overlay
+      esac
+    fi
+  fi
+done

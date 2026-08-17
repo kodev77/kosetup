@@ -1,0 +1,18 @@
+[
+  {
+    "name": "dataverse_example",
+    "url": "dataverse://CLIENT_ID:CLIENT_SECRET@yourorg.crm.dynamics.com?tenant=TENANT_ID"
+  },
+  {
+    "name": "sqlserver_example",
+    "url": "sqlserver://user:password@host:1433/dbname"
+  },
+  {
+    "name": "azure_sql_entra_example",
+    "url": "sqlserver://yourserver.database.windows.net/dbname?authentication=ActiveDirectoryDefault"
+  },
+  {
+    "name": "mysql_example",
+    "url": "mysql://user:password@host:3306/dbname"
+  }
+]

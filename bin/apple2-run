@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# apple2-run: launch linapple from any directory using the user-level
+# config presets in ~/.config/linapple/.
+#
+# Usage:
+#   apple2-run                    - boot first *.dsk in cwd, default scale
+#   apple2-run disk.dsk           - boot named disk, default scale
+#   apple2-run disk.dsk 3         - boot named disk at 3.0x
+#   apple2-run 3                  - auto-find disk, 3.0x
+#   apple2-run disk.dsk 2.5 -f    - disk + 2.5x + linapple's own fullscreen
+#
+# Disk-image extensions auto-detected: dsk, do, po, nib, 2mg, hdv
+
+set -euo pipefail
+
+CONF_DIR="$HOME/.config/linapple"
+DEFAULT_CONF="$CONF_DIR/linapple.conf"
+
+DISK=""
+SCALE=""
+
+# arg1 may be a disk path
+if [[ "${1:-}" =~ \.(dsk|do|po|nib|2mg|hdv)$ ]]; then
+  DISK="$1"
+  shift
+fi
+
+# next arg may be a scale number
+if [[ "${1:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  SCALE="$1"
+  shift
+fi
+
+# auto-find a disk if none was specified
+if [[ -z "$DISK" ]]; then
+  DISK=$(find . -maxdepth 1 -type f \
+    \( -iname "*.dsk" -o -iname "*.do" -o -iname "*.po" \
+       -o -iname "*.nib" -o -iname "*.2mg" -o -iname "*.hdv" \) \
+    2>/dev/null | sort | head -1)
+  if [[ -z "$DISK" ]]; then
+    echo "apple2-run: no disk image in cwd (.dsk/.do/.po/.nib/.2mg/.hdv)" >&2
+    echo "usage: apple2-run [disk] [scale] [linapple-flags...]" >&2
+    exit 1
+  fi
+fi
+
+# choose config
+CONF="$DEFAULT_CONF"
+if [[ -n "$SCALE" ]]; then
+  REQ="$SCALE"
+  [[ "$SCALE" != *.* ]] && REQ="${SCALE}.0"
+  PRESET="$CONF_DIR/linapple-${REQ}x.conf"
+  if [[ -f "$PRESET" ]]; then
+    CONF="$PRESET"
+  else
+    echo "apple2-run: no preset for scale ${SCALE}, using default" >&2
+  fi
+fi
+
+exec linapple --conf "$CONF" -b --d1 "$DISK" "$@"

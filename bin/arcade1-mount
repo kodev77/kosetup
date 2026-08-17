@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Mount ARCADE1 (Windows 7) admin shares for all drives under ~/arcade1/<drive>.
+# Uses credentials from ~/.arcade1.cred (chmod 600). Relies on the LocalAccountTokenFilterPolicy=1
+# registry fix on ARCADE1 that unlocks admin shares (C$ D$ L$ U$) for the local 9oj account.
+set -euo pipefail
+
+# The cab is on DHCP and its IP moves after WiFi re-associations; resolve it by
+# NetBIOS name each run. Override with ARCADE1_HOST=<ip> if discovery fails.
+HOST="${ARCADE1_HOST:-$(nmblookup ARCADE1 2>/dev/null | awk '/^[0-9]+\./ {print $1; exit}')}"
+if [[ -z "$HOST" ]]; then
+  echo "!! Could not resolve ARCADE1 via nmblookup — is the cab on? (Or run: ARCADE1_HOST=<ip> arcade1-mount)" >&2
+  exit 1
+fi
+echo "ARCADE1 resolved to $HOST"
+CRED="$HOME/.arcade1.cred"
+BASE="$HOME/arcade1"
+DRIVES=(C D U)   # L: removed — no such drive on ARCADE1 (stale admin share)
+OPTS="credentials=$CRED,uid=$(id -u),gid=$(id -g),vers=2.0,iocharset=utf8,nofail"
+
+if grep -q '^password=CHANGEME' "$CRED" 2>/dev/null; then
+  echo "!! Edit $CRED and set the real password before mounting." >&2
+  exit 1
+fi
+
+for d in "${DRIVES[@]}"; do
+  mp="$BASE/${d,,}"
+  mkdir -p "$mp"
+  if mountpoint -q "$mp"; then
+    echo "already mounted: ${d}: -> $mp"
+  else
+    if sudo mount -t cifs "//$HOST/${d}\$" "$mp" -o "$OPTS"; then
+      echo "mounted ${d}: -> $mp"
+    else
+      echo "FAILED to mount ${d}: (skipping)" >&2
+    fi
+  fi
+done

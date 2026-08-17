@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Play DOS Rogue (the Steam "Rogue", app 1443430, is just DOS Rogue in DOSBox)
+# NATIVELY via dosbox-staging, windowed — no Steam/Proton/Wine, no hybrid-GPU
+# freeze stack. Uses the game files Steam already downloaded.
+# dosbox-staging defaults to windowed; Alt+Enter toggles fullscreen in-game.
+set -euo pipefail
+GAME_C="$HOME/.local/share/Steam/steamapps/common/Rogue/c"
+if [[ ! -f "$GAME_C/ROGUE/ROGUE.EXE" ]]; then
+  echo "rogue-dos: game files not found at $GAME_C/ROGUE (is the Steam copy installed?)" >&2
+  exit 1
+fi
+cd "$GAME_C"
+exec dosbox-staging -c "mount c ." -c "c:" -c "cd ROGUE" -c "ROGUE.BAT" "$@"
