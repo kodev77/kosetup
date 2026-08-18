@@ -388,8 +388,29 @@ install_group() {
     shell) shell_hook_add; rm -f "$SHELL_DISABLED" ;;
   esac
   while read -r i; do [ -n "$i" ] && install_item "$g" "$i"; done < <(items_of "$g")
+  [ "$g" = retro ] && retro_emulators
   # NOTE: hardware/ (gpu-profile + boot-time perms) is deliberately NOT installed —
   # it needs ASUS hardware plus a distro-specific boot hook; wire it up per-machine.
+}
+
+retro_emulators() { # the launchers need dosbox-staging (simcity/rogue-dos) + linapple (apple2-run)
+  if ! command -v dosbox-staging >/dev/null 2>&1 && ! command -v dosbox >/dev/null 2>&1; then
+    case "$PM" in
+      pacman) sudo pacman -S --needed --noconfirm dosbox-staging \
+                || say "TODO: install dosbox-staging" ;;
+      apt)    sudo apt-get install -y dosbox-staging \
+                || say "TODO: dosbox-staging not in apt — tarball to ~/.local/opt + symlink ~/.local/bin/dosbox-staging" ;;
+      *)      say "TODO: install dosbox-staging for the simcity/rogue-dos launchers" ;;
+    esac
+  fi
+  if ! command -v linapple >/dev/null 2>&1; then
+    if command -v yay >/dev/null 2>&1; then
+      yay -S --needed --noconfirm linapple-git \
+        || say "TODO: linapple install failed — build the linapple repo clone (make && sudo make install)"
+    else
+      say "TODO: linapple for apple2-run — arch: yay -S linapple-git; elsewhere build the linapple repo clone (make && sudo make install)"
+    fi
+  fi
 }
 
 remove_group() {

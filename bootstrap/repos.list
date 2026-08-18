@@ -7,12 +7,17 @@ git@github.com:kodev77/kosetup.git                     @ROOT/kosetup
 git@gitlab.com:kennethortego/repository1-c.git         @ROOT/repository1-c
 git@github.com:kodev77/komarchy.git                    @ROOT/komarchy
 git@github.com:kodev77/tron-digitalclock.git           @ROOT/tron-digitalclock
+# ruffle fork (branch tron-arcade-bake = exporter transparent/software-video bake);
+# after clone: git remote add upstream https://github.com/ruffle-rs/ruffle
+git@github.com:kodev77/ruffle.git                      @ROOT/ruffle
+git@gitlab.com:kennethortego/ffdraft.git               @ROOT/ffdraft
 
 # third-party (https — no auth needed)
-https://github.com/grassmunk/Chicago95.git             @ROOT/Chicago95
-https://github.com/mbadolato/iTerm2-Color-Schemes.git  @ROOT/iTerm2-Color-Schemes --depth 1
+# linapple: Apple II emulator SOURCE — apple2-run needs the binary built from it
+# (make && sudo make install). Chicago95 + iTerm2-Color-Schemes deliberately NOT
+# here: theming stays on the old Devuan box.
 https://github.com/linappleii/linapple.git             @ROOT/linapple
 
 # local-only repos on ko-rog-dev with NO remote yet — push them to a forge and
 # add here if wanted on new machines: ANSI-Themes, ARCADE1, bmgui-tool,
-# Chicago95-Login, dashboard-tile-apps, rogue-tile, vivaldi-ie5-css, ffdraft
+# Chicago95-Login, dashboard-tile-apps, rogue-tile, vivaldi-ie5-css
