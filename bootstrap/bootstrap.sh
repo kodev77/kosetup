@@ -117,6 +117,10 @@ place_secret() { # <usb-file> <dest> — never overwrites
 place_secret gitconfig.work   "$HOME/.gitconfig.work"
 place_secret connections.json "$HOME/.local/share/db_ui/connections.json"
 place_secret arcade1.cred     "$HOME/.arcade1.cred"
+place_secret db2.json         "$HOME/Documents/db2.json"
+# secrets/"Browser Passwords.csv" (if present on the stick) is NOT auto-placed —
+# it's a browser-import artifact: import it via chrome://settings/passwords on
+# the new machine, then delete it from the stick (plaintext passwords).
 
 # --- 7. git identity ---------------------------------------------------------
 git config --global user.name  >/dev/null 2>&1 || git config --global user.name "$GIT_NAME"
