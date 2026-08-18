@@ -9,8 +9,10 @@
 #
 # Disable per-machine (keep the distro prompt, e.g. omarchy's starship) with
 #   export KOSETUP_PROMPT=0   before the kosetup source line in ~/.bashrc.
-# NOTE: if starship is active it rewrites PS1 from its own PROMPT_COMMAND every
-# prompt, so to use THIS prompt on omarchy also remove the starship init line.
+# Reaching this file at all therefore means the prompt IS wanted, so if the
+# distro already started starship (omarchy does, from its own rc, which bash
+# sources before the kosetup hook) starship is evicted below — see
+# __ko_evict_starship. No need to edit the distro's init script.
 
 # git-sh-prompt location varies: Debian-family, then Arch, then git contrib.
 for _ko_gp in /usr/lib/git-core/git-sh-prompt \
@@ -53,16 +55,63 @@ __update_ps1() {
     fi
 }
 
+# starship rewrites PS1 from its own precmd on EVERY prompt, so merely adding
+# __update_ps1 alongside it loses the race and this prompt is never seen. Since
+# KOSETUP_PROMPT=0 is the way to keep the distro prompt, getting here means this
+# prompt was asked for — so take starship out cleanly instead of fighting it.
+# Everything else in PROMPT_COMMAND (omarchy has a terminal-title hook and
+# zoxide in there) is preserved.
+__ko_evict_starship() {
+    declare -F starship_precmd >/dev/null 2>&1 || return 0
+    local e; local -a keep=()
+    if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+        for e in "${PROMPT_COMMAND[@]}"; do
+            [[ "$e" == *starship_precmd* ]] || keep+=("$e")
+        done
+        PROMPT_COMMAND=("${keep[@]}")
+    else
+        PROMPT_COMMAND="${PROMPT_COMMAND//starship_precmd/}"
+        PROMPT_COMMAND="${PROMPT_COMMAND//;;/;}"
+    fi
+    # starship stashes a pre-existing string PROMPT_COMMAND here — put it back
+    [[ -n "${STARSHIP_PROMPT_COMMAND-}" ]] && PROMPT_COMMAND+=("$STARSHIP_PROMPT_COMMAND")
+    # timing hooks: PS0 on bash >= 4.4, a DEBUG trap on older
+    [[ "${PS0-}" == *STARSHIP_START_TIME* ]] && PS0=''
+    case "$(trap -p DEBUG)" in *starship_preexec*) trap - DEBUG ;; esac
+    unset -f starship_precmd starship_preexec starship_preexec_ps0 \
+             starship_preexec_all _starship_set_return 2>/dev/null
+    unset STARSHIP_PROMPT_COMMAND STARSHIP_START_TIME STARSHIP_PREEXEC_READY
+    return 0
+}
+
+# PROMPT_COMMAND is an ARRAY on bash 5.1+ (omarchy's is: starship, title, zoxide).
+# The old string-only form read element [0] and assigned straight back into it,
+# which both hid the other entries and left starship running after __update_ps1.
+__ko_prompt_register() {
+    local e
+    if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+        for e in "${PROMPT_COMMAND[@]}"; do
+            [[ "$e" == *__update_ps1* ]] && return 0
+        done
+        PROMPT_COMMAND=(__update_ps1 "${PROMPT_COMMAND[@]}")
+    else
+        case ";${PROMPT_COMMAND};" in
+            *";__update_ps1;"*) ;;
+            *) PROMPT_COMMAND="__update_ps1${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+        esac
+    fi
+    return 0
+}
+
 if [[ ${BLE_VERSION-} ]]; then
     # -+= appends with dedupe, so re-sourcing ~/.bashrc doesn't double-register
     blehook PREEXEC-+=__mark_cmd_executed
     blehook PRECMD-+=__update_ps1
+    __ko_evict_starship
 else
     trap '__mark_cmd_executed' DEBUG
-    case ";${PROMPT_COMMAND};" in
-        *";__update_ps1;"*) ;;
-        *) PROMPT_COMMAND="__update_ps1${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
-    esac
+    __ko_evict_starship
+    __ko_prompt_register
 fi
 
 # Multi-line PS1 template. \[ \] wrap the non-printing colour escapes; the dynamic
