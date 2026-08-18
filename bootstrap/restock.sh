@@ -1,17 +1,38 @@
 #!/usr/bin/env bash
 # restock.sh — rebuild the bootstrap USB stick from a LIVE kosetup machine
 # (lost/corrupted/new stick). Everything is regenerated from the repo clone,
-# ~/.ssh, and the home directory:
+# ~/.ssh, and the home directory. Run it from the REPO CLONE, not from the
+# stick (the stick's own copy cannot restock — see the repo probe below):
 #
-#   bash bootstrap/restock.sh /media/ko/<stick>/kosetup
+#   bash ~/Work/kosetup/bootstrap/restock.sh /run/media/ko/<stick>/kosetup
 #
 # The one thing it cannot regenerate is the browser-password CSV — re-export
 # that from the browser (vivaldi://settings/passwords -> Export) if wanted.
 set -euo pipefail
 DEST="${1:?usage: restock.sh /path/to/stick/kosetup-dir}"
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 say() { printf '\033[1m[restock]\033[0m %s\n' "$*"; }
+
+# --- locate the repo clone ---------------------------------------------------
+# This script is copied onto the stick too, but lands one level shallower there
+# (<stick>/kosetup/restock.sh vs <repo>/bootstrap/restock.sh). Deriving the
+# root as a blind "one level up from my own directory" therefore aims at the
+# stick root when the stick copy is run, and dies on the first cp below. Probe
+# both layouts and confirm the repo-tracked files are really there, so a wrong
+# invocation fails here with an explanation instead of part-way through.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO=""
+for cand in "$SELF_DIR/.." "$SELF_DIR"; do
+  if [ -f "$cand/bootstrap/bootstrap.sh" ]; then REPO="$(cd "$cand" && pwd)"; break; fi
+done
+if [ -z "$REPO" ]; then
+  say "ERROR: no kosetup repo found from $SELF_DIR"
+  say "       restock.sh rebuilds the stick FROM a clone — it cannot run from"
+  say "       the stick's own copy. Use the clone instead, e.g.:"
+  say "         bash ~/Work/kosetup/bootstrap/restock.sh $DEST"
+  exit 1
+fi
+say "repo: $REPO"
 
 mkdir -p "$DEST/ssh" "$DEST/secrets"
 
@@ -22,8 +43,24 @@ say "bootstrap.sh + ssh_config + repos.list copied from repo"
 # 2. forge keys — prefer this machine's ~/.ssh copies; generate fresh only as
 #    a last resort (fresh keys mean re-uploading the pubkeys to all 3 forges!)
 for k in kosetup_ed25519 kosetup_rsa; do
-  if [ -f "$HOME/.ssh/$k" ]; then
-    cp "$HOME/.ssh/$k" "$HOME/.ssh/$k.pub" "$DEST/ssh/"
+  priv="$HOME/.ssh/$k"
+  if [ -f "$priv" ]; then
+    cp "$priv" "$DEST/ssh/$k"
+    # A missing .pub does NOT mean the key is lost — it derives from the
+    # private half. Copying both in one cp made an absent .pub abort the whole
+    # script (set -e) at step 2 of 4, leaving a stick with keys but no
+    # known_hosts and no secrets; bootstrap.sh skips both of those silently,
+    # so that half-restocked stick looks like a clean run. Derive instead.
+    if [ -f "$priv.pub" ]; then
+      cp "$priv.pub" "$DEST/ssh/$k.pub"
+    elif pub="$(ssh-keygen -y -f "$priv" 2>/dev/null)"; then
+      printf '%s kosetup-usb\n' "$pub" > "$DEST/ssh/$k.pub"
+      say "NOTE: ~/.ssh/$k.pub was missing — regenerated from the private key"
+    else
+      say "WARN: ~/.ssh/$k.pub missing and cannot be derived from $priv"
+      say "      (passphrase-protected or corrupt) — stick gets no $k.pub."
+      say "      ssh can still authenticate from the private key alone."
+    fi
     say "key restored from ~/.ssh: $k"
   else
     case "$k" in
