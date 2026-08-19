@@ -30,7 +30,7 @@ GPU_TMPFILES=/etc/tmpfiles.d/kosetup-gpu-profile.conf
 
 say() { printf '\033[1m[kosetup]\033[0m %s\n' "$*"; }
 
-KGROUPS=(display packages shell inputrc git lazygit nvim nvim-work work-cli tiles retro hardware)
+KGROUPS=(display packages shell inputrc git lazygit claude nvim nvim-work work-cli tiles retro hardware)
 declare -A GDESC=(
   [display]="omarchy display: Berkeley Mono font + one-knob text scaling"
   [packages]="core CLI packages + fd/bat shims"
@@ -38,6 +38,7 @@ declare -A GDESC=(
   [inputrc]="~/.inputrc: case-insensitive completion, colored stats"
   [git]="git include.path: lg/lg2/lgf log aliases, work includeIf"
   [lazygit]="lazygit: flat file list, lg2 log format, theme-safe selection"
+  [claude]="Claude Code: settings + persistent memory (skills come from omarchy; login stays per-machine)"
   [nvim]="nvim overlay (core)"
   [nvim-work]="nvim overlay (work)"
   [work-cli]="dvquery/sqlcmd venvs + stubs + work marker"
@@ -562,6 +563,9 @@ group_status() { # echoes 'x', '~' or ' '
   case "$g" in
     inputrc) points_into_repo "$HOME/.inputrc" && echo x || echo ' '; return ;;
     lazygit) points_into_repo "$HOME/.config/lazygit/config.yml" && echo x || echo ' '; return ;;
+    claude)
+      points_into_repo "$HOME/.claude/settings.json" && \
+      points_into_repo "$HOME/.claude/projects/-home-ko/memory" && echo x || echo ' '; return ;;
     git) git config --global --get-all include.path 2>/dev/null | grep -qF "kosetup/git/ko.gitconfig" \
            && echo x || echo ' '; return ;;
   esac
@@ -938,6 +942,18 @@ install_group() {
     lazygit)
       mkdir -p "$HOME/.config/lazygit"
       link "$REPO/config/lazygit.yml" "$HOME/.config/lazygit/config.yml"; return ;;
+    claude)
+      # Settings, user skills, and MEMORY live in the repo; ~/.claude points at
+      # them. Memory is written by Claude during sessions, so new memories show
+      # up as repo diffs to review/commit — same flow as any other change.
+      # .credentials.json (OAuth) stays machine-local on purpose: run `claude`
+      # and sign in once per machine.
+      # NOTE: ~/.claude/skills is deliberately NOT ours — omarchy installs
+      # those as symlinks into /usr/share/omarchy; owning them would fight it.
+      mkdir -p "$HOME/.claude" "$HOME/.claude/projects/-home-ko"
+      link "$REPO/claude/settings.json" "$HOME/.claude/settings.json"
+      link "$REPO/claude/memory"        "$HOME/.claude/projects/-home-ko/memory"
+      return ;;
     git)
       if ! git config --global --get-all include.path 2>/dev/null | grep -qF "kosetup/git/ko.gitconfig"; then
         git config --global --add include.path "$REPO/git/ko.gitconfig"
@@ -1020,6 +1036,10 @@ remove_group() {
   case "$g" in
     inputrc) unlink_repo "$HOME/.inputrc"; return ;;
     lazygit) unlink_repo "$HOME/.config/lazygit/config.yml"; return ;;
+    claude)
+      unlink_repo "$HOME/.claude/settings.json"
+      unlink_repo "$HOME/.claude/projects/-home-ko/memory"
+      return ;;
     git)
       if git config --global --get-all include.path 2>/dev/null | grep -qF "kosetup/git/ko.gitconfig"; then
         git config --global --unset include.path "kosetup/git/ko\.gitconfig" || true
@@ -1061,7 +1081,7 @@ render() { # "key<TAB>display" lines for menu/list
 print_list() { render | cut -f2-; }
 
 # hardware is safe to list here: it self-skips on non-ASUS machines.
-DEFAULT_SET=(display packages shell inputrc git lazygit nvim tiles retro hardware)
+DEFAULT_SET=(display packages shell inputrc git lazygit claude nvim tiles retro hardware)
 WORK_SET=(nvim-work work-cli)
 
 toggle_key() { # <group> or <group/item>
