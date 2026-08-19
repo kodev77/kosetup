@@ -42,15 +42,16 @@ declare -A GDESC=(
   [nvim-work]="nvim overlay (work)"
   [work-cli]="dvquery/sqlcmd venvs + stubs + work marker"
   [tiles]="TUI tiles -> ~/.local/bin"
-  [retro]="retro game launchers + linapple configs"
+  [retro]="retro launchers + emulators (dosbox, linapple, stella) + dasm 6502 assembler"
   [hardware]="ASUS ROG platform-profile switcher (ASUS hardware only)"
 )
 declare -A IDESC=(
   [display/font]="Berkeley Mono (from repository1-c) -> system monospace"
-  [display/text-size]="text scale 15px (bar ~32, GTK 1.27); terminal pinned 13pt"
+  [display/text-size]="bar 15px (~32 tall); terminal pinned 13pt; GTK apps 1.0x"
   [display/monitors]="known-monitor rules (ViewSonic/LG/laptop) — inert when not connected"
   [display/idle]="screensaver after 20min, never asks a password; auto-lock only if idle 24h"
   [display/clock]="bar clock 12-hour: Tuesday 9:36 PM"
+  [display/libre-icons]="LibreOffice toolbar/sidebar icons -> small (HiDPI auto-pick fix)"
   [shell/aliases]="eza ll/lsa/lt, lg, bat, EDITOR=nvim"
   [shell/fzf-nav]="cdf cdff cdg cds"
   [shell/jcurl]="curl+jq JSON helper"
@@ -64,8 +65,14 @@ declare -A IDESC=(
   [nvim-work/lsp-work]="omnisharp ts_ls angularls"
   [work-cli/dvquery]="Dataverse SQL CLI (venv)"
   [work-cli/sqlcmd]="pymssql wrapper (venv)"
+  [work-cli/az]="Azure CLI (az login / az functionapp ...)"
+  [work-cli/func]="Azure Functions Core Tools (func start)"
+  [work-cli/dotnet]="dotnet SDK, ASP.NET packs, Artifacts credprovider, dev-cert trust (JobTracker)"
+  [work-cli/edge-fw]="ufw: allow docker containers -> host edge dev ports (5000/5002/5100/6000)"
+  [work-cli/teams]="teams-for-linux: Teams with REAL desktop notifications + tray"
+  [work-cli/outlook]="Outlook as an omarchy web app (app-mode window + launcher entry)"
   [retro/simcity]="simcity-1989/1994/2000"
-  [retro/apple2]="apple2-run + linapple configs"
+  [retro/apple2]="apple2-run + zork launcher + linapple configs"
   [retro/rogue-dos]="DOS Rogue via dosbox"
   [retro/arcade1]="ARCADE1 cab CIFS mount/umount"
   [hardware/gpu-profile]="gpu-profile -> ~/.local/bin (quiet/balanced/performance)"
@@ -91,6 +98,16 @@ pkg_names() {
   [ -n "$PM" ] || return 0
   grep -vE '^\s*(#|$)' "$(pkg_list_file)"
 }
+
+# AUR packages (packages/aur.list) — pacman machines with yay only. They join
+# the [packages] group as ordinary items: pkg_present sees them once installed,
+# and removal goes through the same recorded-set pacman path.
+aur_names() {
+  [ "$PM" = pacman ] || return 0
+  grep -vE '^\s*(#|$)' "$REPO/packages/aur.list" 2>/dev/null || true
+}
+
+is_aur_pkg() { aur_names | grep -qxF "$1"; }
 
 pkg_present() {
   case "$PM" in
@@ -184,6 +201,10 @@ asus_hardware() { [ -z "$(hw_skip_reason)" ]; }
 # pin_terminal_size so the 13pt override always lands last.
 DISPLAY_TEXT_SIZE=15
 DISPLAY_TERMINAL_PT=13
+# GTK text-scaling-factor, also DECOUPLED from the knob: 15px maps it to 1.27,
+# which blows up Chrome/nautilus/LibreOffice UI text while the bar+terminal
+# look right. Apps stay at 1.0; only the shell rides the 15px base.
+DISPLAY_GTK_TEXT_SCALE=1.0
 # Idle auto-lock, seconds. The shell has NO off switch here — 0 means "lock the
 # moment the idle cycle starts" (secondsFromConfig treats 0 as valid, and the
 # service locks immediately when lockDelaySeconds == 0), and the stay-awake
@@ -214,7 +235,15 @@ reapply_text_size() { # after font set stomps foot's :size=9
   local cur; cur="$(current_text_size)"
   [ -n "$cur" ] && omarchy display text size "$cur" >/dev/null
   pin_terminal_size
+  pin_gtk_text_scale
 }
+
+pin_gtk_text_scale() { # override the knob's coupled GTK factor
+  command -v gsettings >/dev/null 2>&1 || return 0
+  gsettings set org.gnome.desktop.interface text-scaling-factor "$DISPLAY_GTK_TEXT_SCALE" 2>/dev/null || true
+}
+
+gtk_text_scale() { gsettings get org.gnome.desktop.interface text-scaling-factor 2>/dev/null; }
 
 pin_terminal_size() { # override the coupled pt in every terminal config present
   local pt="$DISPLAY_TERMINAL_PT"
@@ -288,6 +317,37 @@ set_clock_fmt() { # <qt-format> — rewrites only the omarchy.clock entry's form
     "$SHELL_JSON" > "$tmp" && mv "$tmp" "$SHELL_JSON"
 }
 
+# LibreOffice pins its toolbar/sidebar/notebookbar icon size from HiDPI
+# auto-detection unless SymbolSet & friends are set (value 0 = small). Ported
+# from komarchy 006-00029. The file is REWRITTEN BY LIBREOFFICE ON EXIT, so
+# both paths refuse while soffice runs — an edit made now would be lost.
+LIBRE_XCU="$HOME/.config/libreoffice/4/user/registrymodifications.xcu"
+
+libre_running() { pgrep -x soffice.bin >/dev/null 2>&1; }
+
+install_libre_icons() {
+  [ -f "$LIBRE_XCU" ] || { say "TODO: open LibreOffice once to create its config, then re-run display/libre-icons"; return 0; }
+  libre_running && { say "WARN: LibreOffice is running — close it, then re-run display/libre-icons (it rewrites its config on exit)"; return 0; }
+  if grep -q 'oor:name="SymbolSet"' "$LIBRE_XCU"; then say "display: LibreOffice icon size already pinned"; return 0; fi
+  sed -i '/<\/oor:items>/i \
+<!-- BEGIN ko kosetup libre-icons -->\
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="SymbolSet" oor:op="fuse"><value>0</value></prop></item>\
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="SidebarIconSize" oor:op="fuse"><value>0</value></prop></item>\
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="NotebookbarIconSize" oor:op="fuse"><value>0</value></prop></item>\
+<!-- END ko kosetup libre-icons -->' "$LIBRE_XCU"
+  say "display: LibreOffice icons pinned to small"
+}
+
+remove_libre_icons() {
+  [ -f "$LIBRE_XCU" ] || return 0
+  libre_running && { say "WARN: LibreOffice is running — close it, then re-run remove display/libre-icons"; return 0; }
+  # strip our marker block if still intact, then any reserialized single-line
+  # forms of the three properties (LO rewrites items in its own formatting)
+  sed -i '/<!-- BEGIN ko kosetup libre-icons -->/,/<!-- END ko kosetup libre-icons -->/d' "$LIBRE_XCU"
+  sed -i '/oor:name="SymbolSet"/d; /oor:name="SidebarIconSize"/d; /oor:name="NotebookbarIconSize"/d' "$LIBRE_XCU"
+  say "display: LibreOffice icon size back to automatic"
+}
+
 set_idle() { # <screensaver-s> <lock-s> — surgical on .idle only; hot-reloads on save
   [ -f "$SHELL_JSON" ] || { mkdir -p "$(dirname "$SHELL_JSON")"; cp "${OMARCHY_PATH:-/usr/share/omarchy}/config/omarchy/shell.json" "$SHELL_JSON"; }
   local tmp; tmp="$(mktemp)"
@@ -356,12 +416,12 @@ remove_gpu_perms() {
 
 items_of() {
   case "$1" in
-    display)   printf '%s\n' font text-size monitors idle clock ;;   # font FIRST — see ORDER MATTERS above
-    packages)  pkg_names ;;
+    display)   printf '%s\n' font text-size monitors idle clock libre-icons ;;   # font FIRST — see ORDER MATTERS above
+    packages)  pkg_names; aur_names ;;
     shell)     printf '%s\n' aliases fzf-nav jcurl nnn prompt ;;
     nvim)      printf '%s\n' lsp-extra db2 dasm ;;
     nvim-work) printf '%s\n' dadbod dap lsp-work ;;
-    work-cli)  printf '%s\n' dvquery sqlcmd ;;
+    work-cli)  printf '%s\n' dvquery sqlcmd az func dotnet edge-fw teams outlook ;;
     tiles)     printf '%s\n' sys-tile snake-tile clock-tile rogue-tile ;;
     retro)     printf '%s\n' simcity apple2 rogue-dos arcade1 ;;
     hardware)  printf '%s\n' gpu-profile gpu-profile-perms ;;
@@ -406,6 +466,7 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
       done ;;
     retro/apple2)
       printf '%s\t%s\n' "$REPO/bin/apple2-run" "$HOME/.local/bin/apple2-run"
+      printf '%s\t%s\n' "$REPO/bin/zork" "$HOME/.local/bin/zork"
       printf '%s\t%s\n' "$REPO/config/linapple" "$HOME/.config/linapple" ;;
     retro/rogue-dos)
       printf '%s\t%s\n' "$REPO/bin/rogue-dos" "$HOME/.local/bin/rogue-dos" ;;
@@ -459,16 +520,31 @@ item_installed() { # <group> <item>
       case "$i" in
         font)      [ "$(omarchy font current 2>/dev/null)" = "$BERKELEY_FAMILY" ] ;;
         text-size) [ "$(current_text_size)" = "$DISPLAY_TEXT_SIZE" ] && \
-                   { [ ! -f "$HOME/.config/foot/foot.ini" ] || [ "$(foot_size)" = "$DISPLAY_TERMINAL_PT" ]; } ;;
+                   { [ ! -f "$HOME/.config/foot/foot.ini" ] || [ "$(foot_size)" = "$DISPLAY_TERMINAL_PT" ]; } && \
+                   { ! command -v gsettings >/dev/null 2>&1 || [ "$(gtk_text_scale)" = "$DISPLAY_GTK_TEXT_SCALE" ]; } ;;
         monitors)  points_into_repo "$HOME/.config/hypr/monitors-kosetup.lua" && \
                    grep -q '^-- --- BEGIN kosetup monitors ---$' "$MONITORS_LUA" 2>/dev/null ;;
         idle)      [ "$(shell_json_idle lock)" = "$DISPLAY_IDLE_LOCK_S" ] && \
                    [ "$(shell_json_idle screensaver)" = "$DISPLAY_IDLE_SCREENSAVER_S" ] ;;
         clock)     [ "$(shell_json_clock_fmt)" = "$DISPLAY_CLOCK_FMT" ] ;;
+        libre-icons) # match the property, not our marker: LO reserializes the
+                     # file on every exit and only the settings are guaranteed
+                     # to survive, in its own formatting.
+                     grep -q 'oor:name="SymbolSet"' "$LIBRE_XCU" 2>/dev/null ;;
       esac ;;
     packages) pkg_present "$i" ;;
     shell)    shell_hook_present && shell_mod_enabled "$i" ;;
-    work-cli) [ -f "$HOME/.local/bin/$i" ] && grep -q 'kosetup exec stub' "$HOME/.local/bin/$i" 2>/dev/null ;;
+    work-cli)
+      case "$i" in
+        az)   command -v az >/dev/null 2>&1 ;;
+        func) command -v func >/dev/null 2>&1 ;;
+        dotnet) dotnet --list-sdks 2>/dev/null | grep -q . && \
+                [ -f "$HOME/.nuget/plugins/netcore/CredentialProvider.Microsoft/CredentialProvider.Microsoft.dll" ] ;;
+        edge-fw) [ -f "$STATE_DIR/edge-fw" ] ;;
+        teams)   command -v teams-for-linux >/dev/null 2>&1 ;;
+        outlook) [ -f "$HOME/.local/share/applications/Outlook.desktop" ] ;;
+        *) [ -f "$HOME/.local/bin/$i" ] && grep -q 'kosetup exec stub' "$HOME/.local/bin/$i" 2>/dev/null ;;
+      esac ;;
     nvim|nvim-work|tiles|retro)
       first="$(pairs_of "$g" "$i" | head -1 | cut -f2)"
       [ -n "$first" ] && points_into_repo "$first" ;;
@@ -511,16 +587,30 @@ install_item() { # <group> <item>
       case "$i" in
         font)      install_display_font ;;
         text-size) omarchy display text size "$DISPLAY_TEXT_SIZE" >/dev/null
-                   say "display: text size -> ${DISPLAY_TEXT_SIZE}px (bar ~32, GTK)"
-                   pin_terminal_size ;;
+                   say "display: text size -> ${DISPLAY_TEXT_SIZE}px (bar ~32)"
+                   pin_terminal_size
+                   pin_gtk_text_scale
+                   say "display: GTK apps pinned at 1.0x text scale" ;;
         monitors)  install_display_monitors ;;
         idle)      set_idle "$DISPLAY_IDLE_SCREENSAVER_S" "$DISPLAY_IDLE_LOCK_S"
-                   say "display: screensaver after $((DISPLAY_IDLE_SCREENSAVER_S/60))min, auto-lock after $((DISPLAY_IDLE_LOCK_S/3600))h idle (SUPER+CTRL+L to lock now)" ;;
+                   # restart, don't hot-reload: the shell's IdleMonitor goes DEAD
+                   # when its timeout changes at runtime (observed: armed 150s at
+                   # boot, config applied later, then six idle hours produced zero
+                   # idle events). A fresh shell arms correctly from the file.
+                   omarchy restart shell >/dev/null 2>&1 || true
+                   say "display: screensaver after $((DISPLAY_IDLE_SCREENSAVER_S/60))min, auto-lock after $((DISPLAY_IDLE_LOCK_S/3600))h idle (SUPER+CTRL+L to lock now; shell restarted)" ;;
         clock)     set_clock_fmt "$DISPLAY_CLOCK_FMT"
                    say "display: bar clock format -> $DISPLAY_CLOCK_FMT" ;;
+        libre-icons) install_libre_icons ;;
       esac ;;
     packages)
       if pkg_present "$i"; then say "package present: $i"
+      elif is_aur_pkg "$i"; then
+        if command -v yay >/dev/null 2>&1; then
+          yay -S --needed --noconfirm "$i" && pkg_record "$i" || say "WARN: $i (AUR) not installed"
+        else
+          say "TODO: $i is AUR-only — install yay, then: yay -S $i"
+        fi
       else pkg_install_one "$i" && pkg_record "$i" || say "WARN: $i not installed"; fi
       pkg_shims ;;
     shell)
@@ -567,9 +657,11 @@ remove_item() { # <group> <item>
                    say "display: text size reset (12px / 1.0 / 9pt)" ;;
         monitors)  remove_display_monitors ;;
         idle)      set_idle 150 300   # shell defaults (Service.qml defaultScreensaver/LockSeconds)
+                   omarchy restart shell >/dev/null 2>&1 || true   # same stale-monitor workaround
                    say "display: idle restored to defaults (screensaver 150s, lock 300s)" ;;
         clock)     set_clock_fmt "dddd HH:mm"   # canonical shell.json default
                    say "display: bar clock restored to 24-hour" ;;
+        libre-icons) remove_libre_icons ;;
       esac ;;
     packages)
       if grep -qxF "$i" "$PKG_RECORD" 2>/dev/null; then
@@ -612,9 +704,129 @@ nvim_rmdirs() {
         "$NVCONF/autoload/db/adapter" "$NVCONF/autoload/db" 2>/dev/null || true
 }
 
-install_workcli_tool() { # dvquery | sqlcmd
+install_workcli_tool() { # dvquery | sqlcmd | az | func
   local tool="$1" stub
   mkdir -p "$STATE_DIR"; touch "$STATE_DIR/work"
+  # az/func are real packages, not venv-backed repo scripts — no stub, no venv.
+  case "$tool" in
+    az)
+      if command -v az >/dev/null 2>&1; then say "work: az present"
+      elif [ "$PM" = pacman ]; then
+        pkg_install_one azure-cli && pkg_record azure-cli || say "WARN: azure-cli not installed"
+      else
+        say "TODO: az on non-Arch — needs Microsoft's apt repo or https://aka.ms/InstallAzureCLIDeb"
+      fi
+      command -v az >/dev/null 2>&1 && say "work: az ready (az login for RPC tenant)"
+      return 0 ;;
+    dotnet)
+      # JobTracker (prerequisites.md) needs the .NET 10 SDK; a bare runtime/host
+      # (omarchy dep) makes `dotnet clean` report "No .NET SDKs were found".
+      # ASP.NET runtime + targeting pack cover the web projects.
+      if dotnet --list-sdks 2>/dev/null | grep -q .; then say "work: dotnet SDK present"
+      elif [ "$PM" = pacman ]; then
+        for _p in dotnet-sdk aspnet-runtime aspnet-targeting-pack; do
+          pkg_install_one "$_p" && pkg_record "$_p" || say "WARN: $_p not installed"
+        done
+      else
+        say "TODO: dotnet SDK on non-Arch — dotnet-install.sh --channel 10.0 --install-dir ~/.dotnet (work.bash picks up DOTNET_ROOT)"
+      fi
+      dotnet --list-sdks 2>/dev/null | grep -q . && say "work: dotnet ready ($(dotnet --list-sdks | head -1 | cut -d' ' -f1))"
+      # Azure Artifacts credential provider (user-level, ~/.nuget/plugins):
+      # without it, restore against the private OilData.Artifacts feed 401s.
+      # Plain `dotnet restore` runs NON-INTERACTIVE by design, so the provider
+      # may only use cached tokens — hence the TODO: one interactive restore
+      # per machine to do the Entra device-code sign-in and warm the cache.
+      if [ ! -f "$HOME/.nuget/plugins/netcore/CredentialProvider.Microsoft/CredentialProvider.Microsoft.dll" ]; then
+        curl -fsSL https://aka.ms/install-artifacts-credprovider.sh | bash >/dev/null 2>&1 \
+          && say "work: Azure Artifacts credential provider installed" \
+          || say "WARN: credprovider install failed — retry: curl -fsSL https://aka.ms/install-artifacts-credprovider.sh | bash"
+      fi
+      [ -f "$HOME/.local/share/MicrosoftCredentialProvider/SessionTokenCache.dat" ] \
+        || say "TODO: first restore must be interactive: cd <work-repo> && dotnet restore --interactive (device-code sign-in, then plain restore works)"
+      # HTTPS dev-cert trust. Two client families, two stores:
+      #   * Chrome/NSS reads ~/.pki/nssdb — on a fresh machine that db does not
+      #     even exist, so `dev-certs --trust` silently fails into it ("trusted
+      #     by some clients but not others") and Chrome shows Not secure AND
+      #     withholds password-save prompts on the dev sites. Initialize it
+      #     first, then trust.
+      #   * OpenSSL clients (curl, service-to-service HttpClient) need
+      #     SSL_CERT_DIR to include ~/.aspnet/dev-certs/trust — exported by
+      #     shell/work.bash, so that half needs no action here.
+      if command -v certutil >/dev/null 2>&1; then
+        certutil -d sql:"$HOME/.pki/nssdb" -L >/dev/null 2>&1 \
+          || { mkdir -p "$HOME/.pki/nssdb"; certutil -d sql:"$HOME/.pki/nssdb" -N --empty-password; say "work: initialized Chrome NSS store (~/.pki/nssdb)"; }
+        if ! certutil -d sql:"$HOME/.pki/nssdb" -L 2>/dev/null | grep -q aspnetcore-localhost; then
+          dotnet dev-certs https --trust >/dev/null 2>&1 || true
+          certutil -d sql:"$HOME/.pki/nssdb" -L 2>/dev/null | grep -q aspnetcore-localhost \
+            && say "work: ASP.NET dev cert trusted for Chrome (restart Chrome to see the padlock)" \
+            || say "WARN: dev cert did not land in NSS — run: dotnet dev-certs https --trust"
+        else
+          say "work: ASP.NET dev cert already trusted in NSS"
+        fi
+      else
+        say "TODO: certutil missing (pacman: nss) — needed to trust the dev cert for Chrome"
+      fi
+      return 0 ;;
+    outlook)
+      # Outlook stays a WEB app, unlike Teams: prospect-mail (the community
+      # wrapper) is near-abandoned, native clients fight Entra auth for a
+      # worse Outlook, and meeting/chat urgency is already covered by
+      # teams-for-linux. omarchy-webapp-install is the scriptable equivalent
+      # of Chrome's "install app": app-mode window + desktop launcher entry.
+      if ! command -v omarchy-webapp-install >/dev/null 2>&1; then
+        say "TODO: outlook web app — omarchy only (elsewhere: browser PWA of outlook.cloud.microsoft)"
+      elif [ -f "$HOME/.local/share/applications/Outlook.desktop" ]; then
+        say "work: Outlook web app already installed"
+      else
+        omarchy-webapp-install "Outlook" "https://outlook.cloud.microsoft/mail/" \
+          "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/microsoft-outlook.png" >/dev/null \
+          && say "work: Outlook web app installed (launcher: Outlook)" \
+          || say "WARN: omarchy-webapp-install failed for Outlook"
+      fi
+      return 0 ;;
+    teams)
+      # teams-for-linux over the Chrome PWA on purpose: Chrome renders its own
+      # notification popups (invisible to the omarchy shell's notification
+      # daemon — no history, no DND) and goes silent when the window closes.
+      # The Electron app notifies via libnotify and persists in the tray.
+      if command -v teams-for-linux >/dev/null 2>&1; then say "work: teams-for-linux present"
+      elif [ "$PM" = pacman ] && command -v yay >/dev/null 2>&1; then
+        yay -S --needed --noconfirm teams-for-linux \
+          || say "WARN: teams-for-linux install failed — retry: yay -S teams-for-linux"
+      else
+        say "TODO: teams-for-linux — arch: yay -S teams-for-linux; elsewhere see github.com/IsmaelMartinez/teams-for-linux"
+      fi
+      return 0 ;;
+    edge-fw)
+      # omarchy runs ufw; published container ports work, but container->HOST
+      # traffic (the edge nginx proxying to identity/sse/ui services) hits the
+      # INPUT chain and hangs as upstream timeouts. Allow docker's address
+      # space to the JobTracker edge dev ports only. State marker instead of
+      # `ufw status` for the [x] check — reading ufw needs root.
+      if ! command -v ufw >/dev/null 2>&1 || ! systemctl is-active -q ufw 2>/dev/null; then
+        say "work: ufw not active — no container->host firewall rule needed"
+        mkdir -p "$STATE_DIR"; touch "$STATE_DIR/edge-fw"
+      elif [ -f "$STATE_DIR/edge-fw" ]; then
+        say "work: edge firewall rule already applied"
+      else
+        sudo ufw allow proto tcp from 172.16.0.0/12 to any port 5000,5002,5100,6000 \
+          comment 'JobTracker edge dev: containers -> host services' \
+          && { mkdir -p "$STATE_DIR"; touch "$STATE_DIR/edge-fw"; say "work: ufw rule added (docker subnets -> 5000,5002,5100,6000)"; } \
+          || say "WARN: ufw rule failed — run manually with sudo"
+      fi
+      return 0 ;;
+    func)
+      if command -v func >/dev/null 2>&1; then say "work: func present"
+      elif [ "$PM" = pacman ] && command -v yay >/dev/null 2>&1; then
+        # -bin: prebuilt; the source PKGBUILD pulls the whole dotnet build chain
+        yay -S --needed --noconfirm azure-functions-core-tools-bin \
+          || say "WARN: func install failed — retry: yay -S azure-functions-core-tools-bin"
+      else
+        say "TODO: func — arch: yay -S azure-functions-core-tools-bin; elsewhere npm i -g azure-functions-core-tools@4"
+      fi
+      command -v func >/dev/null 2>&1 && say "work: func ready (func start)"
+      return 0 ;;
+  esac
   if [ "$PM" = apt ] && ! python3 -m venv --help >/dev/null 2>&1; then
     sudo apt-get install -y python3-venv
   fi
@@ -658,6 +870,55 @@ STUB
 
 remove_workcli_tool() {
   local tool="$1" stub="$HOME/.local/bin/$1"
+  case "$tool" in
+    az)
+      if grep -qxF azure-cli "$PKG_RECORD" 2>/dev/null; then
+        sudo pacman -Rns --noconfirm azure-cli || true
+        grep -vxF azure-cli "$PKG_RECORD" > "$PKG_RECORD.tmp" || true; mv "$PKG_RECORD.tmp" "$PKG_RECORD"
+        say "work: azure-cli removed (~/.azure login state kept — delete manually to purge)"
+      else
+        say "work: azure-cli was not installed by kosetup — leaving it alone"
+      fi
+      return 0 ;;
+    outlook)
+      # || true: as the final command of an && chain a nonzero exit here
+      # would trip set -e and kill the whole removal run
+      command -v omarchy-webapp-remove >/dev/null 2>&1 && omarchy-webapp-remove "Outlook" 2>/dev/null || true
+      rm -f "$HOME/.local/share/applications/Outlook.desktop"
+      say "work: Outlook web app removed"
+      return 0 ;;
+    teams)
+      if pacman -Q teams-for-linux >/dev/null 2>&1; then
+        sudo pacman -Rns --noconfirm teams-for-linux || true
+        say "work: teams-for-linux removed (~/.config/teams-for-linux kept)"
+      fi
+      return 0 ;;
+    edge-fw)
+      if [ -f "$STATE_DIR/edge-fw" ] && command -v ufw >/dev/null 2>&1; then
+        sudo ufw delete allow proto tcp from 172.16.0.0/12 to any port 5000,5002,5100,6000 2>/dev/null || true
+        say "work: edge firewall rule removed"
+      fi
+      rm -f "$STATE_DIR/edge-fw"
+      return 0 ;;
+    dotnet)
+      local _p
+      for _p in dotnet-sdk aspnet-targeting-pack aspnet-runtime; do
+        if grep -qxF "$_p" "$PKG_RECORD" 2>/dev/null; then
+          sudo pacman -Rns --noconfirm "$_p" || true
+          grep -vxF "$_p" "$PKG_RECORD" > "$PKG_RECORD.tmp" || true; mv "$PKG_RECORD.tmp" "$PKG_RECORD"
+          say "work: $_p removed"
+        else
+          say "work: $_p was not installed by kosetup — leaving it alone"
+        fi
+      done
+      return 0 ;;
+    func)
+      if pacman -Q azure-functions-core-tools-bin >/dev/null 2>&1; then
+        sudo pacman -Rns --noconfirm azure-functions-core-tools-bin || true
+        say "work: azure-functions-core-tools-bin removed"
+      fi
+      return 0 ;;
+  esac
   if [ -f "$stub" ] && grep -q 'kosetup exec stub' "$stub" 2>/dev/null; then
     rm "$stub"; say "removed stub: $stub"
   fi
@@ -722,6 +983,18 @@ retro_emulators() { # the launchers need dosbox-staging (simcity/rogue-dos) + li
                 || say "TODO: dosbox-staging not in apt — tarball to ~/.local/opt + symlink ~/.local/bin/dosbox-staging" ;;
       *)      say "TODO: install dosbox-staging for the simcity/rogue-dos launchers" ;;
     esac
+  fi
+  # Atari 2600 dev loop (repository1-c "atari noob" projects + nvim/dasm item):
+  # stella = the emulator (official repo); dasm = the 6502 assembler (AUR).
+  if ! command -v stella >/dev/null 2>&1 && [ "$PM" = pacman ]; then
+    pkg_install_one stella && pkg_record stella || say "TODO: install stella (Atari 2600 emulator)"
+  fi
+  if ! command -v dasm >/dev/null 2>&1; then
+    if [ "$PM" = pacman ] && command -v yay >/dev/null 2>&1; then
+      yay -S --needed --noconfirm dasm || say "TODO: dasm AUR install failed — yay -S dasm"
+    else
+      say "TODO: dasm assembler — arch: yay -S dasm; elsewhere build from dasm-assembler.github.io"
+    fi
   fi
   if ! command -v linapple >/dev/null 2>&1; then
     if command -v yay >/dev/null 2>&1; then

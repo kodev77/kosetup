@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Play Zork I on the Apple II via linapple. The disk image is the copy curated
+# for the linapple setup (validated with apple2-run), living in repository1-c
+# next to the old per-directory play_zork.sh this launcher globalizes.
+# Extra args pass through to apple2-run, e.g.:  zork 3   (3.0x scale)
+set -euo pipefail
+for _r in "$HOME/Work" "$HOME/repo"; do [ -d "$_r/repository1-c" ] && R1C="$_r/repository1-c" && break; done
+[ -n "${R1C:-}" ] || { echo "zork: repository1-c not found under ~/Work or ~/repo" >&2; exit 1; }
+DSK="$R1C/L3/retro/code/AppleWin/source/09-KOMARCHY-LINAPPLE/Zork_I.dsk"
+[ -f "$DSK" ] || { echo "zork: disk image not found: $DSK" >&2; exit 1; }
+exec apple2-run "$DSK" "$@"
