@@ -53,7 +53,8 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 
 resolve_fan() {
-  local h lf
+  local h lf f
+  # 1st choice: the ASUS hwmon's gpu_fan (the ROG laptop this tile grew up on)
   for h in /sys/class/hwmon/hwmon*; do
     [ "$(cat "$h/name" 2>/dev/null)" = "asus" ] || continue
     for lf in "$h"/fan*_label; do
@@ -61,15 +62,48 @@ resolve_fan() {
       [ "$(cat "$lf" 2>/dev/null)" = "gpu_fan" ] && { echo "${lf%_label}_input"; return 0; }
     done
   done
+  # Fallback: first readable fan input from ANY hwmon (desktop SuperIO chips
+  # like nct6775, dGPU fans, …). Skip stopped/absent fans reporting 0 so a
+  # populated-but-idle header doesn't shadow a real spinning fan elsewhere.
+  # Gauge scale still uses FAN_MAX (GPU_FAN_MAX env to calibrate per machine).
+  for f in /sys/class/hwmon/hwmon*/fan*_input; do
+    [ -r "$f" ] || continue
+    [ "$(cat "$f" 2>/dev/null || echo 0)" -gt 0 ] && { echo "$f"; return 0; }
+  done
   return 1
 }
 resolve_cputemp() {
-  local h lf
+  local h lf tctl=""
   for h in /sys/class/hwmon/hwmon*; do
     [ "$(cat "$h/name" 2>/dev/null)" = "coretemp" ] || continue
     for lf in "$h"/temp*_label; do
       [ -e "$lf" ] || continue
       case "$(cat "$lf" 2>/dev/null)" in Package*) echo "${lf%_label}_input"; return 0;; esac
+    done
+  done
+  # AMD: k10temp. Prefer Tdie (true die temp, present on some SKUs) over Tctl
+  # (control temp — can carry a platform offset, but is all the AZW SER9 has).
+  for h in /sys/class/hwmon/hwmon*; do
+    [ "$(cat "$h/name" 2>/dev/null)" = "k10temp" ] || continue
+    for lf in "$h"/temp*_label; do
+      [ -e "$lf" ] || continue
+      case "$(cat "$lf" 2>/dev/null)" in
+        Tdie) echo "${lf%_label}_input"; return 0;;
+        Tctl) tctl="${lf%_label}_input";;
+      esac
+    done
+  done
+  [ -n "$tctl" ] && { echo "$tctl"; return 0; }
+  return 1
+}
+
+resolve_amdgpu_temp() { # amdgpu hwmon 'edge' sensor (APUs and dGPUs both expose it)
+  local h lf
+  for h in /sys/class/hwmon/hwmon*; do
+    [ "$(cat "$h/name" 2>/dev/null)" = "amdgpu" ] || continue
+    for lf in "$h"/temp*_label; do
+      [ -e "$lf" ] || continue
+      [ "$(cat "$lf" 2>/dev/null)" = "edge" ] && { echo "${lf%_label}_input"; return 0; }
     done
   done
   return 1
@@ -144,6 +178,9 @@ draw() {
 read_cpu() { local a b c d e f g rest; read -r _ a b c d e f g rest < /proc/stat; _cidle=$(( d + e )); _ctotal=$(( a + b + c + d + e + f + g )); }
 
 FANPATH=$(resolve_fan); CPUTEMP=$(resolve_cputemp)
+# AMD GPU fallback sources (used when nvidia-smi yields nothing below)
+AMDGPU_TEMP=$(resolve_amdgpu_temp)
+AMDGPU_BUSY=""; for f in /sys/class/drm/card*/device/gpu_busy_percent; do [ -r "$f" ] && { AMDGPU_BUSY=$f; break; }; done
 WIFI_IF=""; for d in /sys/class/net/*/wireless; do [ -e "$d" ] && { WIFI_IF=$(basename "$(dirname "$d")"); break; }; done
 RXP=0; TXP=0
 if [ -n "$WIFI_IF" ]; then
@@ -172,6 +209,11 @@ while :; do
   if read -r line < <(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.gr --format=csv,noheader,nounits 2>/dev/null); then
     IFS=',' read -r gutil gtemp gpwr gclk <<<"$line"
     gutil=${gutil// /}; gtemp=${gtemp// /}; gpwr=${gpwr// /}; gclk=${gclk// /}
+  elif [ -n "${AMDGPU_BUSY:-}" ] || [ -n "${AMDGPU_TEMP:-}" ]; then
+    # AMD (APU or dGPU): utilisation from drm sysfs, temp from the amdgpu
+    # hwmon edge sensor. No pwr/clk here — those stay '--' in the gpu preset.
+    [ -n "${AMDGPU_BUSY:-}" ] && gutil=$(cat "$AMDGPU_BUSY" 2>/dev/null)
+    [ -n "${AMDGPU_TEMP:-}" ] && [ -r "$AMDGPU_TEMP" ] && gtemp=$(( $(cat "$AMDGPU_TEMP") / 1000 ))
   fi
   [[ "$gutil" =~ ^[0-9]+$ ]] && gpct=$gutil || gpct=0
   rpm=""; fanpct=0
