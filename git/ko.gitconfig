@@ -12,16 +12,11 @@
 [core]
 	autocrlf = false
 
-[pull]
-	rebase = false
-
-[merge]
-	tool = diffview
-[mergetool "diffview"]
-	cmd = nvim -n -c "DiffviewOpen" "$MERGE"
-	trustExitCode = true
-
 [alias]
+	# st/co/br/ci are also in omarchy's own global config, with byte-identical
+	# values — so defining them here is a no-op there, and is what supplies
+	# them on machines WITHOUT omarchy (the Devuan box). Keep them in sync if
+	# omarchy ever changes its versions: this file is included last, so it wins.
 	st = status
 	co = checkout
 	br = branch
