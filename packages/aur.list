@@ -5,3 +5,5 @@
 # google-chrome: daily browser — imported password store lives in it, and it's
 # the az login / work SSO browser. AUR package wraps Google's official build.
 google-chrome
+# leaf: terminal Markdown previewer (github.com/RivoLink/leaf) — `leaf README.md` (-bin: prebuilt, no Rust toolchain)
+leaf-markdown-viewer-bin
