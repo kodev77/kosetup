@@ -114,10 +114,20 @@ else
     __ko_prompt_register
 fi
 
+# Prompt symbol on line 2: U+F0A9 (nf-fa-arrow_circle_right), the circled arrow
+# carried over from the komarchy starship prompt. It lives in the Nerd Font
+# private use area, so a terminal WITHOUT a Nerd Font renders a tofu box —
+# set KOSETUP_PROMPT_SYMBOL='$' in ~/.bashrc on such a machine.
+: "${KOSETUP_PROMPT_SYMBOL:=}"
+
 # Multi-line PS1 template. \[ \] wrap the non-printing colour escapes; the dynamic
 # ${__ps1_*} vars expand to plain text. ANSI slot colours ride the terminal palette:
-# user@host = green (slot 2), path = blue (slot 4), branch = yellow (slot 3).
-PS1='\[\e[1;32m\]\u@\h \[\e[1;34m\]${__ps1_path}\[\e[23;33m\]${__ps1_git}\[\e[0m\]\n\[\e[1;39m\]\$ \[\e[0m\]'
+# user@host = green (slot 2), path = blue (slot 4), branch = yellow (slot 3),
+# prompt symbol = cyan (slot 6, matching komarchy).
+# `⟩` between host and path: same separator the komarchy starship prompt used
+# (its directory format was "⟩ [$path]"). Plain Unicode U+27E9, no Nerd Font
+# needed; cyan to match the line-2 prompt symbol.
+PS1='\[\e[1;32m\]\u@\h \[\e[1;36m\]⟩ \[\e[1;34m\]${__ps1_path}\[\e[23;33m\]${__ps1_git}\[\e[0m\]\n\[\e[1;36m\]${KOSETUP_PROMPT_SYMBOL}\[\e[0m\]  '
 
 # ble.sh redraw fixes (no-ops when ble.sh isn't loaded):
 if [[ ${BLE_VERSION-} ]]; then

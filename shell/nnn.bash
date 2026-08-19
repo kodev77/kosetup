@@ -39,5 +39,8 @@ nnn() {
   fi
   [ ! -f "$NNN_TMPFILE" ] || { . "$NNN_TMPFILE"; rm -f -- "$NNN_TMPFILE"; }
 }
-alias n=nnn   # short form; same wrapper
+# Deliberately NO `alias n=nnn`. Bash expands aliases before it looks up
+# functions, so that alias shadowed omarchy's own n() (open nvim here) — and the
+# shorthand bought nothing, since the nnn function above already shadows the
+# binary. Type `nnn`. Do not re-add it.
 # raw nnn without the wrapper (no cd-on-quit / inline preview): use `command nnn`
