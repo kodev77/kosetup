@@ -41,7 +41,12 @@ return {
         "jay-babu/mason-nvim-dap.nvim",
         dependencies = { "mason-org/mason.nvim" },
         opts = {
-          ensure_installed = { "netcoredbg" },
+          -- Keyed by the nvim-dap ADAPTER name, not the mason package name:
+          -- mason-nvim-dap resolves it through mappings.source.nvim_dap_to_package,
+          -- where ['coreclr'] = 'netcoredbg'. Passing "netcoredbg" here misses the
+          -- lookup, and because it goes through Optional:if_present() it no-ops
+          -- SILENTLY — no error, no notify, the adapter binary just never installs.
+          ensure_installed = { "coreclr" },
           automatic_installation = true,
           handlers = {},
         },
