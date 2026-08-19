@@ -13,10 +13,10 @@ for _r in "$HOME/Work" "$HOME/repo"; do [ -d "$_r/repository1-c" ] && R1C="$_r/r
 [ -n "${R1C:-}" ] || { echo "repository1-c not found under ~/Work or ~/repo" >&2; exit 1; }
 cd "$R1C/L3/retro/gaming/SimCity Games/DOSBox - SimCity Classic - 1994"
 if [[ "${1:-}" == "--setup" ]]; then
-  exec "$DOSBOX" -conf dosbox.linux.conf -noautoexec \
+  exec "$DOSBOX" --working-dir "$PWD" -conf "$PWD/dosbox.linux.conf" -noautoexec \
     -c "mount c SimCityC" \
     -c "c:" \
     -c "SETTINGS.EXE" \
     -c "exit"
 fi
-exec "$DOSBOX" -conf dosbox.linux.conf "$@"
+exec "$DOSBOX" --working-dir "$PWD" -conf "$PWD/dosbox.linux.conf" "$@"

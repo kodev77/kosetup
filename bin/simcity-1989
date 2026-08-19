@@ -9,5 +9,9 @@ DOSBOX="$(command -v dosbox-staging || command -v dosbox)" \
 for _r in "$HOME/Work" "$HOME/repo"; do [ -d "$_r/repository1-c" ] && R1C="$_r/repository1-c" && break; done
 [ -n "${R1C:-}" ] || { echo "repository1-c not found under ~/Work or ~/repo" >&2; exit 1; }
 # cd into the game folder so the conf's relative `mount c "sim city"` resolves.
+# -conf must be ABSOLUTE and --working-dir explicit: dosbox-staging (0.82+)
+# resolves neither relative -conf paths nor the conf's relative mount paths
+# against the process cwd — without --working-dir, `mount c "sim city"`
+# reports "Path 'sim city' not found" even when launched from the game dir.
 cd "$R1C/L3/retro/gaming/SimCity Games/DOSBox - SimCity Classic - 1989"
-exec "$DOSBOX" -conf dosbox.linux.conf "$@"
+exec "$DOSBOX" --working-dir "$PWD" -conf "$PWD/dosbox.linux.conf" "$@"
