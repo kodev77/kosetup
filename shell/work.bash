@@ -11,3 +11,12 @@ export DOTNET_NOLOGO=1
 
 # Aspire CLI (installed by get-aspire-cli.sh)
 [ -d "$HOME/.aspire/bin" ] && export PATH="$HOME/.aspire/bin:$PATH"
+
+# ASP.NET dev-cert trust for OpenSSL-based clients (curl, HttpClient between
+# the Aspire services). `dotnet dev-certs https --trust` exports the cert here,
+# but OpenSSL only honors it when the directory is on SSL_CERT_DIR — the trust
+# command prints exactly this export as its [110] guidance. Chrome/NSS trust is
+# separate (certutil into ~/.pki/nssdb; see work-cli notes).
+if [ -d "$HOME/.aspnet/dev-certs/trust" ]; then
+  export SSL_CERT_DIR="$HOME/.aspnet/dev-certs/trust:${SSL_CERT_DIR:-/etc/ssl/certs}"
+fi
