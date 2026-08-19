@@ -30,12 +30,14 @@ GPU_TMPFILES=/etc/tmpfiles.d/kosetup-gpu-profile.conf
 
 say() { printf '\033[1m[kosetup]\033[0m %s\n' "$*"; }
 
-KGROUPS=(packages shell inputrc git nvim nvim-work work-cli tiles retro hardware)
+KGROUPS=(display packages shell inputrc git lazygit nvim nvim-work work-cli tiles retro hardware)
 declare -A GDESC=(
+  [display]="omarchy display: Berkeley Mono font + one-knob text scaling"
   [packages]="core CLI packages + fd/bat shims"
   [shell]="bashrc hook + shell modules"
   [inputrc]="~/.inputrc: case-insensitive completion, colored stats"
-  [git]="git include.path: aliases, diffview mergetool, work includeIf"
+  [git]="git include.path: lg/lg2/lgf log aliases, work includeIf"
+  [lazygit]="lazygit: flat file list, lg2 log format, theme-safe selection"
   [nvim]="nvim overlay (core)"
   [nvim-work]="nvim overlay (work)"
   [work-cli]="dvquery/sqlcmd venvs + stubs + work marker"
@@ -44,6 +46,11 @@ declare -A GDESC=(
   [hardware]="ASUS ROG platform-profile switcher (ASUS hardware only)"
 )
 declare -A IDESC=(
+  [display/font]="Berkeley Mono (from repository1-c) -> system monospace"
+  [display/text-size]="text scale 15px (bar ~32, GTK 1.27); terminal pinned 13pt"
+  [display/monitors]="known-monitor rules (ViewSonic/LG/laptop) — inert when not connected"
+  [display/idle]="screensaver after 20min, never asks a password; auto-lock only if idle 24h"
+  [display/clock]="bar clock 12-hour: Tuesday 9:36 PM"
   [shell/aliases]="eza ll/lsa/lt, lg, bat, EDITOR=nvim"
   [shell/fzf-nav]="cdf cdff cdg cds"
   [shell/jcurl]="curl+jq JSON helper"
@@ -156,6 +163,176 @@ hw_skip_reason() { # echoes why hardware/ can't install here; empty = it can
 
 asus_hardware() { [ -z "$(hw_skip_reason)" ]; }
 
+# --- omarchy display: font + text scaling ------------------------------------
+# Ported from komarchy group 005 (Berkeley Mono into waybar/fontconfig/ghostty)
+# onto the CURRENT omarchy generation, where the old per-app patching is two
+# stock commands: `omarchy font set` (fontconfig monospace alias + terminals +
+# Quickshell bar) and `omarchy display text size` (shell [font] base-size in
+# ~/.config/omarchy/shell.toml + GTK text-scaling-factor + terminal pt, all in
+# lockstep; the bar's height scales with base-size by itself). 15px reproduces
+# the old waybar numbers: bar ~32px, ~11pt font.
+#
+# The terminal is deliberately DECOUPLED from that knob: 15px maps to an 11pt
+# terminal, but the old setup ran the terminal at 13 and that stays the
+# preference — so pin_terminal_size re-pins every terminal config to
+# DISPLAY_TERMINAL_PT after any omarchy command that rewrites sizes.
+#
+# ORDER MATTERS: `omarchy font set` rewrites foot.ini with a hardcoded
+# `:size=9`, and `omarchy display text size` rewrites terminals to the coupled
+# pt. items_of lists font BEFORE text-size for the group install, the font
+# item re-applies the recorded size afterwards, and both paths finish with
+# pin_terminal_size so the 13pt override always lands last.
+DISPLAY_TEXT_SIZE=15
+DISPLAY_TERMINAL_PT=13
+# Idle auto-lock, seconds. The shell has NO off switch here — 0 means "lock the
+# moment the idle cycle starts" (secondsFromConfig treats 0 as valid, and the
+# service locks immediately when lockDelaySeconds == 0), and the stay-awake
+# toggle (SUPER+CTRL+I) disables the whole cycle INCLUDING the screensaver.
+# So "manual lock only" = keep idle.screensaver at its default and push
+# idle.lock out to a day. Qt timers cap around 24.8 days (ms in a 32-bit int);
+# stay well under that.
+DISPLAY_IDLE_LOCK_S=86400
+DISPLAY_IDLE_SCREENSAVER_S=1200   # 20 min (shell default: 150)
+# Bar clock, Qt.formatDateTime tokens: h = 12-hour no leading zero, AP = AM/PM
+# (shell default: "dddd HH:mm"). NOTE right-clicking the clock cycles formats
+# and PERSISTS the cycled one into shell.json — status flags that as drift.
+DISPLAY_CLOCK_FMT="dddd h:mm AP"
+BERKELEY_FAMILY="Berkeley Mono"
+# repository1-c is a sibling clone (repos.list puts both under @ROOT)
+berkeley_src() { echo "$(dirname "$REPO")/repository1-c/L3/fonts/Berkeley Mono TX-02/TX-02-ZN3QQVKK"; }
+
+display_skip_reason() { # empty = the display items can run here
+  command -v omarchy >/dev/null 2>&1 || echo "no omarchy CLI (not an omarchy machine)"
+}
+
+current_text_size() { # base-size from the machine-level shell.toml, if any
+  sed -n 's/^[[:space:]]*base-size[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' \
+    "$HOME/.config/omarchy/shell.toml" 2>/dev/null | head -1
+}
+
+reapply_text_size() { # after font set stomps foot's :size=9
+  local cur; cur="$(current_text_size)"
+  [ -n "$cur" ] && omarchy display text size "$cur" >/dev/null
+  pin_terminal_size
+}
+
+pin_terminal_size() { # override the coupled pt in every terminal config present
+  local pt="$DISPLAY_TERMINAL_PT"
+  # same files + sed shapes as omarchy-display-text-size, so the two agree
+  [ -f "$HOME/.config/alacritty/alacritty.toml" ] && \
+    sed -i -E "s/^size[[:space:]]*=.*/size = $pt/" "$HOME/.config/alacritty/alacritty.toml"
+  if [ -f "$HOME/.config/kitty/kitty.conf" ]; then
+    sed -i -E "s/^font_size[[:space:]]+.*/font_size $pt.0/" "$HOME/.config/kitty/kitty.conf"
+    pkill -USR1 kitty 2>/dev/null || true
+  fi
+  if [ -f "$HOME/.config/ghostty/config" ]; then
+    sed -i -E "s/^font-size = .*/font-size = $pt/" "$HOME/.config/ghostty/config"
+    pkill -SIGUSR2 ghostty 2>/dev/null || true
+  fi
+  # foot has no reload signal — new windows pick it up
+  [ -f "$HOME/.config/foot/foot.ini" ] && \
+    sed -i -E "s/(:size=)[0-9.]+/\\1$pt/" "$HOME/.config/foot/foot.ini"
+  say "display: terminal font pinned at ${pt}pt (new terminal windows)"
+}
+
+foot_size() { sed -n 's/.*:size=\([0-9.]*\).*/\1/p' "$HOME/.config/foot/foot.ini" 2>/dev/null | head -1; }
+
+install_display_font() {
+  if ! ls "$HOME/.local/share/fonts"/BerkeleyMono*.ttf >/dev/null 2>&1; then
+    local src; src="$(berkeley_src)"
+    if [ ! -d "$src" ]; then
+      say "TODO: Berkeley Mono TTFs not found — clone repository1-c next to kosetup ($src)"
+      return 0
+    fi
+    mkdir -p "$HOME/.local/share/fonts"
+    cp "$src"/*.ttf "$HOME/.local/share/fonts/"
+    fc-cache -f >/dev/null 2>&1
+    say "display: Berkeley Mono TTFs installed to ~/.local/share/fonts"
+  fi
+  if [ "$(omarchy font current 2>/dev/null)" = "$BERKELEY_FAMILY" ]; then
+    say "display: font already $BERKELEY_FAMILY"
+  else
+    omarchy font set "$BERKELEY_FAMILY" >/dev/null 2>&1
+    say "display: monospace font -> $BERKELEY_FAMILY"
+  fi
+  # Unconditional, even on the already-branch: a bare `omarchy font set` run
+  # outside kosetup stomps foot to :size=9, and re-running this item is the
+  # natural way to repair that — the early return used to leave the stomp.
+  reapply_text_size
+}
+
+remove_display_font() {
+  # Back to the omarchy default family; TTFs stay in ~/.local/share/fonts
+  # (delete manually to purge) — mirrors the venv-keep behaviour of work-cli.
+  if [ "$(omarchy font current 2>/dev/null)" = "$BERKELEY_FAMILY" ]; then
+    omarchy font set "JetBrainsMono Nerd Font" >/dev/null 2>&1
+    reapply_text_size
+    say "display: font restored to JetBrainsMono Nerd Font (TTFs kept on disk)"
+  fi
+}
+
+MONITORS_LUA="$HOME/.config/hypr/monitors.lua"
+SHELL_JSON="$HOME/.config/omarchy/shell.json"
+
+shell_json_idle() { jq -r ".idle.$1 // empty" "$SHELL_JSON" 2>/dev/null; }
+
+shell_json_clock_fmt() {
+  jq -r '[.bar.layout[][] | select(.id == "omarchy.clock") | .format] | first // empty' \
+    "$SHELL_JSON" 2>/dev/null
+}
+
+set_clock_fmt() { # <qt-format> — rewrites only the omarchy.clock entry's format
+  [ -f "$SHELL_JSON" ] || { mkdir -p "$(dirname "$SHELL_JSON")"; cp "${OMARCHY_PATH:-/usr/share/omarchy}/config/omarchy/shell.json" "$SHELL_JSON"; }
+  local tmp; tmp="$(mktemp)"
+  jq --arg f "$1" '.bar.layout |= map_values(map(if .id == "omarchy.clock" then .format = $f else . end))' \
+    "$SHELL_JSON" > "$tmp" && mv "$tmp" "$SHELL_JSON"
+}
+
+set_idle() { # <screensaver-s> <lock-s> — surgical on .idle only; hot-reloads on save
+  [ -f "$SHELL_JSON" ] || { mkdir -p "$(dirname "$SHELL_JSON")"; cp "${OMARCHY_PATH:-/usr/share/omarchy}/config/omarchy/shell.json" "$SHELL_JSON"; }
+  local tmp; tmp="$(mktemp)"
+  jq --argjson ss "$1" --argjson lk "$2" '.idle.screensaver = $ss | .idle.lock = $lk' \
+    "$SHELL_JSON" > "$tmp" && mv "$tmp" "$SHELL_JSON"
+}
+
+hypr_validate() { # per omarchy guidance: reload, then configerrors must be clean
+  command -v hyprctl >/dev/null 2>&1 || { say "NOTE: no hyprctl — rules apply on next Hyprland start"; return 0; }
+  hyprctl reload >/dev/null 2>&1 || true
+  local errs; errs="$(hyprctl configerrors 2>/dev/null)"
+  case "$errs" in
+    ''|*"no errors"*) say "display: hyprland reloaded, config clean" ;;
+    *) say "WARN: hyprctl configerrors reports:"; printf '%s\n' "$errs" | sed 's/^/  /' ;;
+  esac
+}
+
+install_display_monitors() {
+  mkdir -p "$HOME/.config/hypr"
+  link "$REPO/config/hypr/monitors-kosetup.lua" "$HOME/.config/hypr/monitors-kosetup.lua"
+  touch "$MONITORS_LUA"
+  if ! grep -q '^-- --- BEGIN kosetup monitors ---$' "$MONITORS_LUA"; then
+    cat >> "$MONITORS_LUA" <<'LUA'
+
+-- --- BEGIN kosetup monitors ---
+-- pcall: if the kosetup symlink is ever removed out-of-band, the require
+-- fails soft instead of taking the whole Hyprland config down with it.
+pcall(require, "hypr.monitors-kosetup")
+-- --- END kosetup monitors ---
+LUA
+    say "display: monitors.lua — kosetup require block added"
+  fi
+  hypr_validate
+}
+
+remove_display_monitors() {
+  if grep -q '^-- --- BEGIN kosetup monitors ---$' "$MONITORS_LUA" 2>/dev/null; then
+    sed -i '/^-- --- BEGIN kosetup monitors ---$/,/^-- --- END kosetup monitors ---$/d' "$MONITORS_LUA"
+    say "display: monitors.lua — kosetup require block removed"
+  fi
+  unlink_repo "$HOME/.config/hypr/monitors-kosetup.lua"
+  hypr_validate
+}
+
+
 install_gpu_perms() { # make platform_profile group-writable at every boot
   if [ ! -d /etc/tmpfiles.d ]; then
     say "TODO: no /etc/tmpfiles.d here — run $REPO/hardware/50-gpu-profile-perms"
@@ -179,6 +356,7 @@ remove_gpu_perms() {
 
 items_of() {
   case "$1" in
+    display)   printf '%s\n' font text-size monitors idle clock ;;   # font FIRST — see ORDER MATTERS above
     packages)  pkg_names ;;
     shell)     printf '%s\n' aliases fzf-nav jcurl nnn prompt ;;
     nvim)      printf '%s\n' lsp-extra db2 dasm ;;
@@ -241,7 +419,12 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
 
 # --- shell module enable/disable ---------------------------------------------
 
-shell_hook_present() { grep -q 'kosetup/shell/init.bash' "$HOME/.bashrc" 2>/dev/null; }
+# Detect via the BEGIN marker, not the source line: the old check grepped for
+# the literal 'kosetup/shell/init.bash', so it only matched when the clone was
+# named exactly 'kosetup' and reported "not installed" for any other directory
+# name — re-adding the hook and re-seeding the module list on every run. The
+# marker is what remove_group already keys on, so the two now agree.
+shell_hook_present() { grep -q '^# --- BEGIN kosetup ---$' "$HOME/.bashrc" 2>/dev/null; }
 
 shell_hook_add() {
   if ! shell_hook_present; then
@@ -272,6 +455,17 @@ shell_mod_disable() {
 item_installed() { # <group> <item>
   local g="$1" i="$2" first
   case "$g" in
+    display)
+      case "$i" in
+        font)      [ "$(omarchy font current 2>/dev/null)" = "$BERKELEY_FAMILY" ] ;;
+        text-size) [ "$(current_text_size)" = "$DISPLAY_TEXT_SIZE" ] && \
+                   { [ ! -f "$HOME/.config/foot/foot.ini" ] || [ "$(foot_size)" = "$DISPLAY_TERMINAL_PT" ]; } ;;
+        monitors)  points_into_repo "$HOME/.config/hypr/monitors-kosetup.lua" && \
+                   grep -q '^-- --- BEGIN kosetup monitors ---$' "$MONITORS_LUA" 2>/dev/null ;;
+        idle)      [ "$(shell_json_idle lock)" = "$DISPLAY_IDLE_LOCK_S" ] && \
+                   [ "$(shell_json_idle screensaver)" = "$DISPLAY_IDLE_SCREENSAVER_S" ] ;;
+        clock)     [ "$(shell_json_clock_fmt)" = "$DISPLAY_CLOCK_FMT" ] ;;
+      esac ;;
     packages) pkg_present "$i" ;;
     shell)    shell_hook_present && shell_mod_enabled "$i" ;;
     work-cli) [ -f "$HOME/.local/bin/$i" ] && grep -q 'kosetup exec stub' "$HOME/.local/bin/$i" 2>/dev/null ;;
@@ -291,6 +485,7 @@ group_status() { # echoes 'x', '~' or ' '
   local g="$1" i inst=0 tot=0
   case "$g" in
     inputrc) points_into_repo "$HOME/.inputrc" && echo x || echo ' '; return ;;
+    lazygit) points_into_repo "$HOME/.config/lazygit/config.yml" && echo x || echo ' '; return ;;
     git) git config --global --get-all include.path 2>/dev/null | grep -qF "kosetup/git/ko.gitconfig" \
            && echo x || echo ' '; return ;;
   esac
@@ -310,12 +505,38 @@ group_status() { # echoes 'x', '~' or ' '
 install_item() { # <group> <item>
   local g="$1" i="$2"
   case "$g" in
+    display)
+      local why; why="$(display_skip_reason)"
+      if [ -n "$why" ]; then say "skip display/$i — $why"; return 0; fi
+      case "$i" in
+        font)      install_display_font ;;
+        text-size) omarchy display text size "$DISPLAY_TEXT_SIZE" >/dev/null
+                   say "display: text size -> ${DISPLAY_TEXT_SIZE}px (bar ~32, GTK)"
+                   pin_terminal_size ;;
+        monitors)  install_display_monitors ;;
+        idle)      set_idle "$DISPLAY_IDLE_SCREENSAVER_S" "$DISPLAY_IDLE_LOCK_S"
+                   say "display: screensaver after $((DISPLAY_IDLE_SCREENSAVER_S/60))min, auto-lock after $((DISPLAY_IDLE_LOCK_S/3600))h idle (SUPER+CTRL+L to lock now)" ;;
+        clock)     set_clock_fmt "$DISPLAY_CLOCK_FMT"
+                   say "display: bar clock format -> $DISPLAY_CLOCK_FMT" ;;
+      esac ;;
     packages)
       if pkg_present "$i"; then say "package present: $i"
       else pkg_install_one "$i" && pkg_record "$i" || say "WARN: $i not installed"; fi
       pkg_shims ;;
-    shell) shell_hook_add; shell_mod_enable "$i"
-           [ "$i" = nnn ] && { mkdir -p "$HOME/.config/nnn"; link "$REPO/config/nnn.tmux.conf" "$HOME/.config/nnn/nnn.tmux.conf"; } || true ;;
+    shell)
+      # Modules are opt-OUT: init.bash treats an ABSENT shell-disabled list as
+      # "every module on". So on the first shell item installed to a machine,
+      # adding the hook alone would silently enable all five — picking one item
+      # in the menu installed the whole group. Seed the list with everything
+      # first, so enabling one really does mean one. Keyed on the hook being
+      # absent, which is what distinguishes a first install from a later
+      # single-item add on top of a group install (group install rm's the list
+      # to mean "all on", and must stay that way).
+      if ! shell_hook_present; then
+        mkdir -p "$STATE_DIR"; items_of shell > "$SHELL_DISABLED"
+      fi
+      shell_hook_add; shell_mod_enable "$i"
+      [ "$i" = nnn ] && { mkdir -p "$HOME/.config/nnn"; link "$REPO/config/nnn.tmux.conf" "$HOME/.config/nnn/nnn.tmux.conf"; } || true ;;
     work-cli) install_workcli_tool "$i" ;;
     nvim|nvim-work)
       nvim_base_ok || return 0
@@ -338,6 +559,18 @@ install_item() { # <group> <item>
 remove_item() { # <group> <item>
   local g="$1" i="$2"
   case "$g" in
+    display)  # needs the omarchy CLI; without it nothing was installed anyway
+      command -v omarchy >/dev/null 2>&1 || { say "display/$i: no omarchy CLI — nothing to remove"; return 0; }
+      case "$i" in
+        font)      remove_display_font ;;
+        text-size) omarchy display text size reset >/dev/null
+                   say "display: text size reset (12px / 1.0 / 9pt)" ;;
+        monitors)  remove_display_monitors ;;
+        idle)      set_idle 150 300   # shell defaults (Service.qml defaultScreensaver/LockSeconds)
+                   say "display: idle restored to defaults (screensaver 150s, lock 300s)" ;;
+        clock)     set_clock_fmt "dddd HH:mm"   # canonical shell.json default
+                   say "display: bar clock restored to 24-hour" ;;
+      esac ;;
     packages)
       if grep -qxF "$i" "$PKG_RECORD" 2>/dev/null; then
         case "$PM" in
@@ -441,6 +674,9 @@ install_group() {
   say "--- install: $g ---"
   case "$g" in
     inputrc) link "$REPO/config/inputrc" "$HOME/.inputrc"; return ;;
+    lazygit)
+      mkdir -p "$HOME/.config/lazygit"
+      link "$REPO/config/lazygit.yml" "$HOME/.config/lazygit/config.yml"; return ;;
     git)
       if ! git config --global --get-all include.path 2>/dev/null | grep -qF "kosetup/git/ko.gitconfig"; then
         git config --global --add include.path "$REPO/git/ko.gitconfig"
@@ -455,6 +691,9 @@ install_group() {
     hardware)
       why="$(hw_skip_reason)"
       if [ -n "$why" ]; then say "hardware: skipped — $why"; return 0; fi ;;
+    display)
+      why="$(display_skip_reason)"
+      if [ -n "$why" ]; then say "display: skipped — $why"; return 0; fi ;;
   esac
   while read -r i; do [ -n "$i" ] && install_item "$g" "$i"; done < <(items_of "$g")
   # `if` rather than `[ ... ] && retro_emulators`: as the LAST statement of this
@@ -466,8 +705,19 @@ install_group() {
 retro_emulators() { # the launchers need dosbox-staging (simcity/rogue-dos) + linapple (apple2-run)
   if ! command -v dosbox-staging >/dev/null 2>&1 && ! command -v dosbox >/dev/null 2>&1; then
     case "$PM" in
-      pacman) sudo pacman -S --needed --noconfirm dosbox-staging \
-                || say "TODO: install dosbox-staging" ;;
+      # dosbox-staging left the official Arch repos (extra/dosbox is the 2010
+      # SVN DOSBox — too old for these confs, and rogue-dos needs staging
+      # outright); it lives in the AUR now, so take the yay route like linapple.
+      pacman) if command -v yay >/dev/null 2>&1; then
+                # source build first; the 0.83 RC has a racy build graph that
+                # can fail randomly under parallel ninja — fall back to the
+                # prebuilt stable dosbox-staging-bin rather than TODO-ing out.
+                yay -S --needed --noconfirm dosbox-staging \
+                  || yay -S --needed --noconfirm dosbox-staging-bin \
+                  || say "TODO: dosbox-staging AND -bin both failed — retry: yay -S dosbox-staging-bin"
+              else
+                say "TODO: dosbox-staging is AUR-only on Arch — install yay, then: yay -S dosbox-staging-bin"
+              fi ;;
       apt)    sudo apt-get install -y dosbox-staging \
                 || say "TODO: dosbox-staging not in apt — tarball to ~/.local/opt + symlink ~/.local/bin/dosbox-staging" ;;
       *)      say "TODO: install dosbox-staging for the simcity/rogue-dos launchers" ;;
@@ -481,6 +731,14 @@ retro_emulators() { # the launchers need dosbox-staging (simcity/rogue-dos) + li
       say "TODO: linapple for apple2-run — arch: yay -S linapple-git; elsewhere build the linapple repo clone (make && sudo make install)"
     fi
   fi
+  # linapple-git's PKGBUILD has a doubled prefix bug: the binary lands at
+  # /usr/usr/local/bin/linapple, which is on nobody's PATH — the package
+  # installs "successfully" and linapple still can't be found. Bridge it.
+  if ! command -v linapple >/dev/null 2>&1 && [ -x /usr/usr/local/bin/linapple ]; then
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn /usr/usr/local/bin/linapple "$HOME/.local/bin/linapple"
+    say "retro: linapple bridged to ~/.local/bin (AUR package installs to /usr/usr/local/bin)"
+  fi
 }
 
 remove_group() {
@@ -488,6 +746,7 @@ remove_group() {
   say "--- remove: $g ---"
   case "$g" in
     inputrc) unlink_repo "$HOME/.inputrc"; return ;;
+    lazygit) unlink_repo "$HOME/.config/lazygit/config.yml"; return ;;
     git)
       if git config --global --get-all include.path 2>/dev/null | grep -qF "kosetup/git/ko.gitconfig"; then
         git config --global --unset include.path "kosetup/git/ko\.gitconfig" || true
@@ -529,7 +788,7 @@ render() { # "key<TAB>display" lines for menu/list
 print_list() { render | cut -f2-; }
 
 # hardware is safe to list here: it self-skips on non-ASUS machines.
-DEFAULT_SET=(packages shell inputrc git nvim tiles retro hardware)
+DEFAULT_SET=(display packages shell inputrc git lazygit nvim tiles retro hardware)
 WORK_SET=(nvim-work work-cli)
 
 toggle_key() { # <group> or <group/item>

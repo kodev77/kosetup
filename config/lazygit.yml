@@ -1,0 +1,33 @@
+# kosetup lazygit config — symlinked to ~/.config/lazygit/config.yml by install.sh.
+# Ported from komarchy migrations 007-00031 / 018-00075, plus a readability fix.
+
+gui:
+  # Flat list of changed files instead of a collapsible tree. Faster to scan and
+  # to stage from when a change touches a handful of files across directories.
+  showFileTree: false
+
+  theme:
+    # lazygit's default is `selectedLineBgColor: [blue]` — a FIXED blue block
+    # painted behind the row while the text keeps its own status colour. On a
+    # dark omarchy theme those two land on top of each other and the selected
+    # filename becomes unreadable. `reverse` instead swaps whatever fg/bg the
+    # terminal is already using, so the selection always contrasts, on any
+    # theme, the same way shell/nnn.bash rides the ANSI palette rather than
+    # hardcoding colours.
+    selectedLineBgColor:
+      - reverse
+    inactiveViewSelectedLineBgColor:
+      - reverse
+
+git:
+  log:
+    showWholeGraph: false
+
+  # Local Branches panel [3] — same format as `git lg2`.
+  branchLogCmd: "git log --graph --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset) %C(bold green)- %an%C(reset) %C(dim bold green)(%ar)%C(reset)%C(auto)%d%C(reset)' {{branchName}} --"
+
+  # Status panel — cycle these with `a`. First is the `git lg2` format (author +
+  # relative date), second the compact `git lg` format.
+  allBranchesLogCmds:
+    - "git log --graph --all --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset) %C(bold green)- %an%C(reset) %C(dim bold green)(%ar)%C(reset)%C(auto)%d%C(reset)'"
+    - "git log --graph --all --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset)%C(auto)%d%C(reset)'"
