@@ -37,8 +37,9 @@ say "repo: $REPO"
 mkdir -p "$DEST/ssh" "$DEST/secrets"
 
 # 1. repo-tracked files
-cp "$REPO/bootstrap/bootstrap.sh" "$REPO/bootstrap/ssh_config" "$REPO/bootstrap/repos.list" "$DEST/"
-say "bootstrap.sh + ssh_config + repos.list copied from repo"
+cp "$REPO/bootstrap/bootstrap.sh" "$REPO/bootstrap/ssh_config" "$REPO/bootstrap/repos.list" \
+   "$REPO/bootstrap/restock.sh" "$REPO/bootstrap/README.md" "$DEST/"
+say "bootstrap.sh + ssh_config + repos.list + restock.sh + README.md copied from repo"
 
 # 2. forge keys — prefer this machine's ~/.ssh copies; generate fresh only as
 #    a last resort (fresh keys mean re-uploading the pubkeys to all 3 forges!)
