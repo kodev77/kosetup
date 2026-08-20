@@ -62,6 +62,15 @@ resolve_fan() {
       [ "$(cat "$lf" 2>/dev/null)" = "gpu_fan" ] && { echo "${lf%_label}_input"; return 0; }
     done
   done
+  # Apple (MacBookPro11,4 and friends): applesmc is a legacy-style driver. It
+  # registers a BARE hwmon node — /sys/class/hwmon/hwmonN has no name and no
+  # fan*_input at all — and hangs every attribute off the platform device
+  # instead. The generic hwmon glob below therefore matches nothing on a Mac
+  # and the tile showed a permanent N/A. Take fan1 (Apple labels them "Left
+  # side"/"Right side"; neither is a GPU fan, this machine has no dGPU).
+  for f in /sys/devices/platform/applesmc.*/fan1_input; do
+    [ -r "$f" ] && { echo "$f"; return 0; }
+  done
   # Fallback: first readable fan input from ANY hwmon (desktop SuperIO chips
   # like nct6775, dGPU fans, …). Skip stopped/absent fans reporting 0 so a
   # populated-but-idle header doesn't shadow a real spinning fan elsewhere.
@@ -105,6 +114,14 @@ resolve_amdgpu_temp() { # amdgpu hwmon 'edge' sensor (APUs and dGPUs both expose
       [ -e "$lf" ] || continue
       [ "$(cat "$lf" 2>/dev/null)" = "edge" ] && { echo "${lf%_label}_input"; return 0; }
     done
+  done
+  return 1
+}
+
+resolve_i915() { # Intel integrated graphics: the drm card dir carrying gt_*_freq_mhz
+  local c
+  for c in /sys/class/drm/card*; do
+    [ -r "$c/gt_act_freq_mhz" ] && { echo "$c"; return 0; }
   done
   return 1
 }
@@ -181,6 +198,23 @@ FANPATH=$(resolve_fan); CPUTEMP=$(resolve_cputemp)
 # AMD GPU fallback sources (used when nvidia-smi yields nothing below)
 AMDGPU_TEMP=$(resolve_amdgpu_temp)
 AMDGPU_BUSY=""; for f in /sys/class/drm/card*/device/gpu_busy_percent; do [ -r "$f" ] && { AMDGPU_BUSY=$f; break; }; done
+# Intel iGPU fallback (last resort — only if there is no nvidia/amd GPU)
+I915_DIR=$(resolve_i915 || true)
+I915_MIN=0; I915_MAX=0; I915_RC6=""; prev_rc6=0; prev_cs=0
+if [ -n "${I915_DIR:-}" ]; then
+  I915_MIN=$(cat "$I915_DIR/gt_min_freq_mhz" 2>/dev/null || echo 0)
+  I915_MAX=$(cat "$I915_DIR/gt_max_freq_mhz" 2>/dev/null || echo 0)
+  # RC6 = the render engine's deep-idle power state. Time spent OUT of it is a
+  # real measurement of GPU activity, unlike the clock (which sits pinned at
+  # its 200MHz floor through all light compositor work and reads as a flat 0%).
+  for _f in "$I915_DIR/power/rc6_residency_ms" "$I915_DIR/gt/gt0/rc6_residency_ms"; do
+    [ -r "$_f" ] && { I915_RC6=$_f; break; }
+  done
+  if [ -n "$I915_RC6" ]; then
+    prev_rc6=$(cat "$I915_RC6" 2>/dev/null || echo 0)
+    read -r _up _ < /proc/uptime; prev_cs=${_up/./}
+  fi
+fi
 WIFI_IF=""; for d in /sys/class/net/*/wireless; do [ -e "$d" ] && { WIFI_IF=$(basename "$(dirname "$d")"); break; }; done
 RXP=0; TXP=0
 if [ -n "$WIFI_IF" ]; then
@@ -214,6 +248,36 @@ while :; do
     # hwmon edge sensor. No pwr/clk here — those stay '--' in the gpu preset.
     [ -n "${AMDGPU_BUSY:-}" ] && gutil=$(cat "$AMDGPU_BUSY" 2>/dev/null)
     [ -n "${AMDGPU_TEMP:-}" ] && [ -r "$AMDGPU_TEMP" ] && gtemp=$(( $(cat "$AMDGPU_TEMP") / 1000 ))
+  elif [ -n "${I915_DIR:-}" ]; then
+    # Intel integrated (MacBook Iris Pro, NUCs, …). Two honest caveats:
+    #  * There is no engine busy-percent in sysfs (that needs the i915 PMU,
+    #    what intel_gpu_top opens — far too heavy for a poll loop). RC6
+    #    residency is the next best thing and IS a real measurement: the
+    #    fraction of wall time the render engine was awake rather than in its
+    #    deep-idle state. It reads "GPU awake", not "GPU working hard".
+    #  * The iGPU is on the CPU die and has no separate thermal sensor, so the
+    #    package temp IS its temp — the same number the cpu row shows.
+    gclk=$(cat "$I915_DIR/gt_act_freq_mhz" 2>/dev/null)
+    if [ -n "$I915_RC6" ]; then
+      # busy% = share of wall time the GPU was NOT in RC6. 10# on both reads:
+      # /proc/uptime with a small hundredths value ("0.08") would otherwise be
+      # parsed as octal and abort the frame.
+      now_rc6=$(cat "$I915_RC6" 2>/dev/null || echo 0)
+      read -r _up _ < /proc/uptime; now_cs=${_up/./}
+      d_wall=$(( (10#$now_cs - 10#$prev_cs) * 10 ))
+      d_rc6=$(( now_rc6 - prev_rc6 ))
+      prev_rc6=$now_rc6; prev_cs=$now_cs
+      if (( d_wall > 0 && d_rc6 >= 0 )); then
+        gutil=$(( 100 - (d_rc6 * 100 / d_wall) ))
+        (( gutil < 0 )) && gutil=0; (( gutil > 100 )) && gutil=100
+      fi
+    elif [[ "$gclk" =~ ^[0-9]+$ ]] && (( I915_MAX > I915_MIN )); then
+      # No RC6 counter: fall back to where the clock sits in its range. Only a
+      # proxy — it stays at 0% for light work that never lifts the clock.
+      gutil=$(( (gclk - I915_MIN) * 100 / (I915_MAX - I915_MIN) ))
+      (( gutil < 0 )) && gutil=0; (( gutil > 100 )) && gutil=100
+    fi
+    [ -n "${CPUTEMP:-}" ] && [ -r "$CPUTEMP" ] && gtemp=$(( $(cat "$CPUTEMP") / 1000 ))
   fi
   [[ "$gutil" =~ ^[0-9]+$ ]] && gpct=$gutil || gpct=0
   rpm=""; fanpct=0
