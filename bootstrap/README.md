@@ -35,8 +35,11 @@ is needed to restore its full context of these machines.
 
 ## Per-machine ceremonies (by design not automated — mostly logins)
 - `claude` → sign in (settings/memory already arrive via the repo).
-- Chrome: sign into Google (password store syncs down), Chrome restart
-  after the dotnet item so the dev-cert padlock applies.
+- Chrome: install via `omarchy install browser chrome` (NOT plain yay —
+  the omarchy installer adds the theme-color policy dir, Wayland/libsecret
+  flags file, and copy-url/yt-dlp helpers), then sign into Google
+  (password store syncs down). Chrome restart after the dotnet item so
+  the dev-cert padlock applies.
 - `az login` (Azure CLI) — browser flow.
 - Work repos: clone manually into `~/Work/rpc/` (deliberately not in
   repos.list — no work URLs in a personal repo). Identity switches to

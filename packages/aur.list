@@ -2,8 +2,10 @@
 # (skipped entirely on apt machines — add Debian equivalents to apt.list or a
 # TODO in install.sh if one of these is ever needed there).
 #
-# google-chrome: daily browser — imported password store lives in it, and it's
-# the az login / work SSO browser. AUR package wraps Google's official build.
-google-chrome
+# google-chrome deliberately NOT here: install it with `omarchy install browser
+# chrome` instead (bootstrap README, per-machine ceremonies). The bare AUR
+# package skips Omarchy's browser setup — /etc/opt/chrome/policies/managed
+# (theme colors never apply and can't be set manually), ~/.config/chrome-flags.conf
+# (native Wayland + gnome-libsecret password store), and the copy-url/yt-dlp hosts.
 # leaf: terminal Markdown previewer (github.com/RivoLink/leaf) — `leaf README.md` (-bin: prebuilt, no Rust toolchain)
 leaf-markdown-viewer-bin
