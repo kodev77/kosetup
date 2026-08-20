@@ -4,9 +4,11 @@
 # Work identity override for work-repo dirs (create ~/.gitconfig.work with the
 # work [user] block on work machines; silently ignored when the file is absent).
 # Both layouts matched: ~/rpc/repo/ (old Devuan box) and ~/Work/rpc/ (omarchy).
-[includeIf "gitdir:~/rpc/repo/"]
+# gitdir/i = case-insensitive: the dir was cloned as ~/Work/RPC on ko-mini and
+# plain gitdir: silently kept the personal identity there.
+[includeIf "gitdir/i:~/rpc/repo/"]
 	path = ~/.gitconfig.work
-[includeIf "gitdir:~/Work/rpc/"]
+[includeIf "gitdir/i:~/Work/rpc/"]
 	path = ~/.gitconfig.work
 
 [core]
