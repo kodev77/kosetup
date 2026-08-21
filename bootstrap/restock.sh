@@ -90,6 +90,8 @@ restock_secret "$HOME/.gitconfig.work"                        gitconfig.work
 restock_secret "$HOME/.local/share/db_ui/connections.json"    connections.json
 restock_secret "$HOME/.arcade1.cred"                          arcade1.cred
 restock_secret "$HOME/Documents/db2.json"                     db2.json
+restock_secret "$HOME/.config/ffdraft/sa-key.json"            ffdraft-sa-key.json
+restock_secret "$HOME/.config/ffdraft/extra_sheets.txt"       ffdraft-extra_sheets.txt
 
 sync
 say "done — stick restocked at $DEST"

@@ -18,6 +18,7 @@
 #   ssh/known_hosts                                    pinned host keys
 #   ssh_config                                         Host blocks (no secrets)
 #   secrets/gitconfig.work, secrets/connections.json, secrets/arcade1.cred
+#   secrets/ffdraft-sa-key.json, secrets/ffdraft-extra_sheets.txt   ffdraft pipeline
 #   repos.list                                         what to clone where
 set -euo pipefail
 USB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -142,9 +143,32 @@ place_secret gitconfig.work   "$HOME/.gitconfig.work"
 place_secret connections.json "$HOME/.local/share/db_ui/connections.json"
 place_secret arcade1.cred     "$HOME/.arcade1.cred"
 place_secret db2.json         "$HOME/Documents/db2.json"
+place_secret ffdraft-sa-key.json      "$HOME/.config/ffdraft/sa-key.json"
+place_secret ffdraft-extra_sheets.txt "$HOME/.config/ffdraft/extra_sheets.txt"
 # secrets/"Browser Passwords.csv" (if present on the stick) is NOT auto-placed —
 # it's a browser-import artifact: import it via chrome://settings/passwords on
 # the new machine, then delete it from the stick (plaintext passwords).
+
+# --- ffdraft deps ------------------------------------------------------------
+# The fantasy-football pipeline (@ROOT/ffdraft) needs user-level gspread+pandas
+# (its scripts run bare python3 — no venv; see ffdraft/README.md). Only bother
+# when its service-account key was placed above.
+if [ -f "$HOME/.config/ffdraft/sa-key.json" ]; then
+  if python3 -c 'import gspread, pandas' >/dev/null 2>&1; then
+    say "ffdraft: python deps already present"
+  else
+    if ! command -v pip3 >/dev/null 2>&1; then
+      if command -v apt-get >/dev/null 2>&1; then sudo apt-get install -y python3-pip
+      elif command -v pacman >/dev/null 2>&1; then sudo pacman -S --needed --noconfirm python-pip
+      fi
+    fi
+    if pip3 install --user --break-system-packages gspread pandas >/dev/null 2>&1; then
+      say "ffdraft: gspread + pandas installed"
+    else
+      say "WARN: ffdraft deps failed — run: pip3 install --user --break-system-packages gspread pandas"
+    fi
+  fi
+fi
 
 # --- 8. git identity ---------------------------------------------------------
 git config --global user.name  >/dev/null 2>&1 || git config --global user.name "$GIT_NAME"
