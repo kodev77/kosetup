@@ -49,7 +49,7 @@ declare -A GDESC=(
 declare -A IDESC=(
   [display/font]="Berkeley Mono (from repository1-c) -> system monospace"
   [display/text-size]="bar 15px (~32 tall); terminal pinned 13pt; GTK apps 1.0x"
-  [display/monitors]="known-monitor rules (ViewSonic/LG/laptop) — inert when not connected"
+  [display/monitors]="known-monitor rules (ViewSonic/LG/laptop); laptop panel dark + panel scale under an external — inert when not connected"
   [display/idle]="screensaver after 20min, never asks a password; auto-lock only if idle 24h"
   [display/clock]="bar clock 12-hour: Tuesday 9:36 PM"
   [display/libre-icons]="LibreOffice toolbar/sidebar icons -> small (HiDPI auto-pick fix)"
@@ -304,6 +304,41 @@ remove_display_font() {
 MONITORS_LUA="$HOME/.config/hypr/monitors.lua"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 
+# omarchy's monitors.lua declares a catch-all `output = ""` rule whose scale is
+# APPLIED LAST every time a monitor changes state, and it BEATS every specific
+# rule in monitors-kosetup.lua — measured on 0.56.2 with the catch-all forced
+# to a marker value: the ROG panel came back at the specific rule's scale for
+# about a second, then snapped to the catch-all's. Registration order does not
+# change it, a second catch-all of our own does not win, and a desc: selector
+# does not either. Every other ko display only ever looked correct because
+# "auto" resolved to the wanted value anyway (ViewSonic 32" 1440p -> 1, MacBook
+# retina -> 2); the ROG is the first machine where they differ.
+#
+# One static value cannot serve a 16" panel and a 32" external, so it has to
+# follow the hotplug state — but a catch-all declared inside the required
+# module does not take effect AT ALL (measured: the panel falls back to
+# Hyprland's own auto). It only counts from monitors.lua itself. So on the
+# laptops that blank their panel (PANEL_OFF in monitors-kosetup.lua) we comment
+# omarchy's line out and write one whose scale comes from catchall_scale():
+# the rule stays in monitors.lua, the decision lives in the repo file. The
+# original line is kept commented directly below, and remove_display_monitors
+# puts it back verbatim.
+MONITORS_CATCHALL_TAG='-- --- BEGIN kosetup catch-all ---'
+MONITORS_CATCHALL_END='-- --- END kosetup catch-all ---'
+
+# The literal this machine's catch-all is pinned to. MUST match that machine's
+# PANEL_OFF scale in monitors-kosetup.lua — the panel takes its scale from the
+# catch-all, not from its own rule. Externals are unaffected: a desc: rule DOES
+# win for a freshly hotplugged monitor (verified — the ViewSonic comes back at
+# its own 1 while this says 1.6); it is only the panel's disabled->enabled path
+# that loses to the catch-all. Empty = leave omarchy's "auto" alone.
+catchall_scale_for_machine() {
+  case "$(cat /sys/class/dmi/id/product_name 2>/dev/null)" in
+    "ROG Zephyrus M16"*) echo 1.6 ;;   # = PANEL_OFF ^ROG Zephyrus M16 scale
+    *)                   echo "" ;;
+  esac
+}
+
 shell_json_idle() { jq -r ".idle.$1 // empty" "$SHELL_JSON" 2>/dev/null; }
 
 shell_json_clock_fmt() {
@@ -381,7 +416,55 @@ pcall(require, "hypr.monitors-kosetup")
 LUA
     say "display: monitors.lua — kosetup require block added"
   fi
+  adopt_monitor_catchall
   hypr_validate
+}
+
+# Exact stock line — matched as a FIXED string, not a regex: sed cannot build
+# this replacement (a multi-line block collapses into one line), so the file is
+# rewritten line by line instead.
+CATCHALL_LINE='hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })'
+
+adopt_monitor_catchall() { # machines with a scale above only; idempotent
+  local ws; ws="$(catchall_scale_for_machine)"
+  [ -n "$ws" ] || return 0
+  # -F -- : the tag starts with "--", which grep otherwise reads as an option
+  if grep -qF -- "$MONITORS_CATCHALL_TAG" "$MONITORS_LUA" 2>/dev/null; then
+    say "display: monitors.lua — catch-all already ours"; return 0
+  fi
+  if ! grep -qxF -- "$CATCHALL_LINE" "$MONITORS_LUA" 2>/dev/null; then
+    say "WARN: monitors.lua has no stock catch-all line to replace —"
+    say "      leaving it alone; the laptop panel may come back at the wrong scale"
+    return 0
+  fi
+  local tmp; tmp="$(mktemp)"
+  while IFS= read -r line; do
+    if [ "$line" = "$CATCHALL_LINE" ]; then
+      { echo "$MONITORS_CATCHALL_TAG"
+        echo "-- The catch-all beats the panel's own rule, so THIS is what sets the"
+        echo "-- panel's scale (see note 4 in monitors-kosetup.lua). It must be a"
+        echo "-- LITERAL and it must live in this file: the same rule declared in the"
+        echo "-- kosetup module, or given a computed value here, is silently ignored"
+        echo "-- and the panel falls back to Hyprland's auto. Externals keep their own"
+        echo "-- desc: scale — those win on a fresh hotplug."
+        echo "hl.monitor({ output = \"\", mode = \"preferred\", position = \"auto\", scale = $ws })"
+        echo "$MONITORS_CATCHALL_END"
+        printf -- '-- %s\n' "$line"   # original, restored on remove
+      } >> "$tmp"
+    else
+      printf '%s\n' "$line" >> "$tmp"
+    fi
+  done < "$MONITORS_LUA"
+  mv "$tmp" "$MONITORS_LUA"
+  say "display: monitors.lua — catch-all pinned to $ws (it, not the panel rule, sets the panel scale)"
+}
+
+release_monitor_catchall() { # put omarchy's line back exactly as it was
+  grep -qF -- "$MONITORS_CATCHALL_TAG" "$MONITORS_LUA" 2>/dev/null || return 0
+  sed -i "/^$MONITORS_CATCHALL_TAG\$/,/^$MONITORS_CATCHALL_END\$/d" "$MONITORS_LUA"
+  # the original line sits commented where the block was; uncomment it
+  sed -i 's|^-- hl\.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })$|hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })|' "$MONITORS_LUA"
+  say "display: monitors.lua — omarchy catch-all restored"
 }
 
 remove_display_monitors() {
@@ -389,6 +472,7 @@ remove_display_monitors() {
     sed -i '/^-- --- BEGIN kosetup monitors ---$/,/^-- --- END kosetup monitors ---$/d' "$MONITORS_LUA"
     say "display: monitors.lua — kosetup require block removed"
   fi
+  release_monitor_catchall
   unlink_repo "$HOME/.config/hypr/monitors-kosetup.lua"
   hypr_validate
 }
@@ -524,7 +608,9 @@ item_installed() { # <group> <item>
                    { [ ! -f "$HOME/.config/foot/foot.ini" ] || [ "$(foot_size)" = "$DISPLAY_TERMINAL_PT" ]; } && \
                    { ! command -v gsettings >/dev/null 2>&1 || [ "$(gtk_text_scale)" = "$DISPLAY_GTK_TEXT_SCALE" ]; } ;;
         monitors)  points_into_repo "$HOME/.config/hypr/monitors-kosetup.lua" && \
-                   grep -q '^-- --- BEGIN kosetup monitors ---$' "$MONITORS_LUA" 2>/dev/null ;;
+                   grep -q '^-- --- BEGIN kosetup monitors ---$' "$MONITORS_LUA" 2>/dev/null && \
+                   { [ -z "$(catchall_scale_for_machine)" ] || \
+                     grep -qF -- "$MONITORS_CATCHALL_TAG" "$MONITORS_LUA" 2>/dev/null; } ;;
         idle)      [ "$(shell_json_idle lock)" = "$DISPLAY_IDLE_LOCK_S" ] && \
                    [ "$(shell_json_idle screensaver)" = "$DISPLAY_IDLE_SCREENSAVER_S" ] ;;
         clock)     [ "$(shell_json_clock_fmt)" = "$DISPLAY_CLOCK_FMT" ] ;;
