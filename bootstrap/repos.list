@@ -14,7 +14,7 @@ git@gitlab.com:kennethortego/ffdraft.git               @ROOT/ffdraft
 
 # third-party (https — no auth needed)
 # linapple: Apple II emulator SOURCE — apple2-run needs the binary built from it
-# (make && sudo make install). Chicago95 + iTerm2-Color-Schemes deliberately NOT
+# (CMake — `install.sh retro` builds it; upstream dropped the Makefile). Chicago95 + iTerm2-Color-Schemes deliberately NOT
 # here: theming stays on the old Devuan box.
 https://github.com/linappleii/linapple.git             @ROOT/linapple
 

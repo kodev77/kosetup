@@ -1099,21 +1099,51 @@ retro_emulators() { # the launchers need dosbox-staging (simcity/rogue-dos) + li
     fi
   fi
   if ! command -v linapple >/dev/null 2>&1; then
-    if command -v yay >/dev/null 2>&1; then
-      yay -S --needed --noconfirm linapple-git \
-        || say "TODO: linapple install failed — build the linapple repo clone (make && sudo make install)"
-    else
-      say "TODO: linapple for apple2-run — arch: yay -S linapple-git; elsewhere build the linapple repo clone (make && sudo make install)"
-    fi
+    install_linapple || say "TODO: linapple for apple2-run — see install_linapple in this script"
   fi
-  # linapple-git's PKGBUILD has a doubled prefix bug: the binary lands at
-  # /usr/usr/local/bin/linapple, which is on nobody's PATH — the package
-  # installs "successfully" and linapple still can't be found. Bridge it.
-  if ! command -v linapple >/dev/null 2>&1 && [ -x /usr/usr/local/bin/linapple ]; then
-    mkdir -p "$HOME/.local/bin"
-    ln -sfn /usr/usr/local/bin/linapple "$HOME/.local/bin/linapple"
-    say "retro: linapple bridged to ~/.local/bin (AUR package installs to /usr/usr/local/bin)"
+}
+
+# linapple is BUILT FROM THE SIBLING CLONE, not from a package. The AUR
+# linapple-git PKGBUILD still runs `make PREFIX=/usr`, but upstream moved to
+# CMake and shipped no Makefile at all, so it dies with "No targets specified
+# and no makefile found" (ko-rog, 2026-08-21). That package also had the older
+# doubled-prefix bug that put the binary in /usr/usr/local/bin, so nothing of
+# value is lost by dropping it.
+#
+# CMake's default prefix is /usr/local and needs root (INSTALL.md claims a
+# non-root run redirects to ~/.local — it does not, it just fails), so pin
+# ~/.local explicitly: binary -> ~/.local/bin/linapple (already on PATH for the
+# tiles), assets -> ~/.local/share/linapple, conf -> ~/.local/etc/linapple.
+# No sudo for the build or install; only the deps below need it.
+linapple_src() { echo "$(dirname "$REPO")/linapple"; }
+
+install_linapple() {
+  local src; src="$(linapple_src)"
+  if [ ! -f "$src/CMakeLists.txt" ]; then
+    say "TODO: linapple sources not found — clone linapple next to kosetup ($src)"
+    return 1
   fi
+  if [ "$PM" = pacman ]; then
+    # sdl3_image is the one that is easy to miss: everything else is usually
+    # already in from base-devel/omarchy, and its absence fails at CONFIGURE
+    # time with a FindSDL3_image.cmake error rather than anything obvious.
+    local pkg
+    for pkg in cmake libzip zlib curl imagemagick sdl3 sdl3_image; do
+      pacman -Q "$pkg" >/dev/null 2>&1 && continue
+      pkg_install_one "$pkg" && pkg_record "$pkg" || {
+        say "TODO: linapple needs $pkg — sudo pacman -S --needed $pkg"; return 1; }
+    done
+  else
+    say "NOTE: install linapple's build deps by hand — see $src/INSTALL.md"
+  fi
+  command -v cmake >/dev/null 2>&1 || { say "TODO: linapple needs cmake"; return 1; }
+  say "retro: building linapple from $src (SDL3 frontend, this takes a minute)"
+  # build/ is gitignored upstream, so this leaves the clone clean
+  cmake -S "$src" -B "$src/build" -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX="$HOME/.local" >/dev/null 2>&1     && cmake --build "$src/build" -j"$(nproc)" >/dev/null 2>&1     && cmake --install "$src/build" >/dev/null 2>&1     || { say "TODO: linapple build failed — run it by hand for the error:"
+         say "      cmake -S $src -B $src/build -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX=\$HOME/.local"
+         say "      cmake --build $src/build -j\$(nproc) && cmake --install $src/build"
+         return 1; }
+  say "retro: linapple built + installed to ~/.local/bin"
 }
 
 remove_group() {
