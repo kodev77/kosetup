@@ -57,7 +57,7 @@ if [[ -n "$SCALE" ]]; then
   fi
 fi
 
-# --config, not --conf: the flag is `-c, --config` (linapple --help). `--conf`
-# only works as a GNU getopt_long prefix abbreviation, which silently stops
-# working the day upstream adds any other --conf* option.
-exec linapple --config "$CONF" -b --d1 "$DISK" "$@"
+# --conf and --d1 are the flags of the linapple install.sh pins (2023-era).
+# Upstream's 2026 rewrite renamed --conf to --config; do not "modernize" these
+# without also moving the pin, or the emulator silently ignores the config.
+exec linapple --conf "$CONF" -b --d1 "$DISK" "$@"

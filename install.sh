@@ -1034,47 +1034,73 @@ retro_emulators() { # the launchers need dosbox-staging (simcity/rogue-dos) + li
   fi
 }
 
-# linapple is BUILT FROM THE SIBLING CLONE, not from a package. The AUR
-# linapple-git PKGBUILD still runs `make PREFIX=/usr`, but upstream moved to
-# CMake and shipped no Makefile at all, so it dies with "No targets specified
-# and no makefile found" (ko-rog, 2026-08-21). That package also had the older
-# doubled-prefix bug that put the binary in /usr/usr/local/bin, so nothing of
-# value is lost by dropping it.
+# linapple is BUILT FROM THE SIBLING CLONE, at a PINNED COMMIT.
 #
-# CMake's default prefix is /usr/local and needs root (INSTALL.md claims a
-# non-root run redirects to ~/.local — it does not, it just fails), so pin
-# ~/.local explicitly: binary -> ~/.local/bin/linapple (already on PATH for the
-# tiles), assets -> ~/.local/share/linapple, conf -> ~/.local/etc/linapple.
-# No sudo for the build or install; only the deps below need it.
+# Two separate things pushed us here. The AUR linapple-git package stopped
+# building at all: it still runs `make PREFIX=/usr`, but upstream migrated to
+# CMake on 2026-04-12 and deleted the Makefile, so it dies with "No targets
+# specified and no makefile found". And upstream's master is mid-rewrite --
+# dormant since 2023, then ~410 commits from 2026-03 onward -- where the
+# pre-//e machines are broken: Computer Emulation 0 (Apple ][) and 1 (Apple
+# ][+) both come up to a screen of garbage glyphs and never reach the
+# Applesoft prompt, with or without a disk, on upstream's own stock conf.
+# 2 (//e) and 3 (//e enhanced) are fine. Measured on ko-rog, 2026-08-22.
+#
+# ][+ is the machine these disks and confs are for, and it is what the rest of
+# the fleet runs -- the beelink and the old Devuan box got linapple during the
+# dormant era, which is why it works there and broke only on the machine that
+# built master. So pin the last pre-rewrite commit rather than track a branch
+# that can change the emulator underneath the setup. It is also the build
+# apple2-run's `--conf` / `--d1` flags were written against; master renamed
+# --conf to --config.
+#
+# Revisit when upstream settles: if the pre-//e path gets fixed, drop the pin
+# and this whole comment.
+LINAPPLE_PIN=eb1f22e   # 2023-10-17, last commit before the 2026 rewrite
 linapple_src() { echo "$(dirname "$REPO")/linapple"; }
+linapple_build_dir() { echo "$HOME/.cache/kosetup/linapple-$LINAPPLE_PIN"; }
 
 install_linapple() {
-  local src; src="$(linapple_src)"
-  if [ ! -f "$src/CMakeLists.txt" ]; then
-    say "TODO: linapple sources not found — clone linapple next to kosetup ($src)"
+  local src bld; src="$(linapple_src)"; bld="$(linapple_build_dir)"
+  if [ ! -d "$src/.git" ]; then
+    say "TODO: linapple clone not found — clone it next to kosetup ($src)"
     return 1
   fi
   if [ "$PM" = pacman ]; then
-    # sdl3_image is the one that is easy to miss: everything else is usually
-    # already in from base-devel/omarchy, and its absence fails at CONFIGURE
-    # time with a FindSDL3_image.cmake error rather than anything obvious.
+    # sdl12-compat provides sdl-config and libSDL-1.2; sdl_image is the SDL 1.2
+    # image loader (NOT sdl2_image). Both are still in the official repos.
     local pkg
-    for pkg in cmake libzip zlib curl imagemagick sdl3 sdl3_image; do
+    for pkg in base-devel git sdl12-compat sdl_image libx11 libzip curl zlib; do
       pacman -Q "$pkg" >/dev/null 2>&1 && continue
       pkg_install_one "$pkg" && pkg_record "$pkg" || {
         say "TODO: linapple needs $pkg — sudo pacman -S --needed $pkg"; return 1; }
     done
   else
-    say "NOTE: install linapple's build deps by hand — see $src/INSTALL.md"
+    say "NOTE: install SDL 1.2 + SDL_image 1.2 + libzip/curl/zlib by hand for linapple"
   fi
-  command -v cmake >/dev/null 2>&1 || { say "TODO: linapple needs cmake"; return 1; }
-  say "retro: building linapple from $src (SDL3 frontend, this takes a minute)"
-  # build/ is gitignored upstream, so this leaves the clone clean
-  cmake -S "$src" -B "$src/build" -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX="$HOME/.local" >/dev/null 2>&1     && cmake --build "$src/build" -j"$(nproc)" >/dev/null 2>&1     && cmake --install "$src/build" >/dev/null 2>&1     || { say "TODO: linapple build failed — run it by hand for the error:"
-         say "      cmake -S $src -B $src/build -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX=\$HOME/.local"
-         say "      cmake --build $src/build -j\$(nproc) && cmake --install $src/build"
-         return 1; }
-  say "retro: linapple built + installed to ~/.local/bin"
+  # Build from a worktree so the clone itself stays on whatever branch the user
+  # has checked out — never leave someone's repo on a detached HEAD.
+  if [ ! -e "$bld/Makefile" ]; then
+    mkdir -p "$(dirname "$bld")"
+    git -C "$src" worktree add --detach "$bld" "$LINAPPLE_PIN" >/dev/null 2>&1 || {
+      say "TODO: could not create the linapple worktree at $bld"
+      say "      (is $LINAPPLE_PIN in the clone? try: git -C $src fetch --all)"
+      return 1; }
+    say "retro: linapple worktree at $LINAPPLE_PIN"
+  fi
+  say "retro: building linapple $LINAPPLE_PIN (Apple ][+ capable; takes a minute)"
+  # -j1 fallback: this Makefile has a racy dependency graph and drops a couple
+  # of objects under parallel make, which only shows up as a link error.
+  if ! { make -C "$bld" -j"$(nproc)" >/dev/null 2>&1 || make -C "$bld" -j1 >/dev/null 2>&1; }; then
+    say "TODO: linapple build failed — run it by hand for the error:"
+    say "      make -C $bld -j1"
+    return 1
+  fi
+  # DESTDIR defaults to PREFIX here, so this lands in ~/.local/bin +
+  # ~/.local/share/linapple. No sudo anywhere in this function.
+  make -C "$bld" PREFIX="$HOME/.local" install >/dev/null 2>&1 || {
+    say "TODO: linapple install failed — make -C $bld PREFIX=\$HOME/.local install"; return 1; }
+  say "retro: linapple $LINAPPLE_PIN installed to ~/.local/bin"
 }
 
 remove_group() {
