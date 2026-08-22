@@ -25,12 +25,10 @@ STATE_DIR="$HOME/.local/state/kosetup"
 PKG_RECORD="$STATE_DIR/installed-packages"
 SHELL_DISABLED="$STATE_DIR/shell-disabled"
 NVCONF="$HOME/.config/nvim"
-PLATFORM_PROFILE=/sys/firmware/acpi/platform_profile
-GPU_TMPFILES=/etc/tmpfiles.d/kosetup-gpu-profile.conf
 
 say() { printf '\033[1m[kosetup]\033[0m %s\n' "$*"; }
 
-KGROUPS=(display packages shell inputrc git lazygit claude nvim nvim-work work-cli tiles retro hardware)
+KGROUPS=(display packages shell inputrc git lazygit claude nvim nvim-work work-cli tiles retro)
 declare -A GDESC=(
   [display]="omarchy display: Berkeley Mono font + one-knob text scaling"
   [packages]="core CLI packages + fd/bat shims"
@@ -44,7 +42,6 @@ declare -A GDESC=(
   [work-cli]="dvquery/sqlcmd venvs + stubs + work marker"
   [tiles]="TUI tiles -> ~/.local/bin"
   [retro]="retro launchers + emulators (dosbox, linapple, stella) + dasm 6502 assembler"
-  [hardware]="ASUS ROG platform-profile switcher (ASUS hardware only)"
 )
 declare -A IDESC=(
   [display/font]="Berkeley Mono (from repository1-c) -> system monospace"
@@ -76,8 +73,6 @@ declare -A IDESC=(
   [retro/apple2]="apple2-run + zork launcher + linapple configs"
   [retro/rogue-dos]="DOS Rogue via dosbox"
   [retro/arcade1]="ARCADE1 cab CIFS mount/umount"
-  [hardware/gpu-profile]="gpu-profile -> ~/.local/bin (quiet/balanced/performance)"
-  [hardware/gpu-profile-perms]="boot hook: platform_profile writable by group video"
 )
 
 NO_PROMPT=0 NVIM_APPIMAGE=0
@@ -160,26 +155,6 @@ nvim_base_ok() {
     return 1
   fi
 }
-
-# --- hardware detection ------------------------------------------------------
-# The hardware/ items drive /sys/firmware/acpi/platform_profile, which the
-# asus-wmi driver exposes on ASUS ROG machines. Installing them anywhere else
-# just puts a gpu-profile in ~/.local/bin that can only ever print an error, so
-# both the group and the individual items refuse up front. Note that REMOVAL is
-# deliberately NOT gated — a machine that has them must be able to shed them
-# even if the hardware or the driver changed underneath.
-
-hw_vendor() { cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo unknown; }
-
-hw_skip_reason() { # echoes why hardware/ can't install here; empty = it can
-  case "$(hw_vendor)" in
-    ASUS*|ASUSTeK*) ;;
-    *) echo "not ASUS hardware (DMI vendor: $(hw_vendor))"; return ;;
-  esac
-  [ -e "$PLATFORM_PROFILE" ] || echo "no $PLATFORM_PROFILE (asus-wmi not exposing it)"
-}
-
-asus_hardware() { [ -z "$(hw_skip_reason)" ]; }
 
 # --- omarchy display: font + text scaling ------------------------------------
 # Ported from komarchy group 005 (Berkeley Mono into waybar/fontconfig/ghostty)
@@ -478,25 +453,6 @@ remove_display_monitors() {
 }
 
 
-install_gpu_perms() { # make platform_profile group-writable at every boot
-  if [ ! -d /etc/tmpfiles.d ]; then
-    say "TODO: no /etc/tmpfiles.d here — run $REPO/hardware/50-gpu-profile-perms"
-    say "      at boot instead (that script is the /etc/rc.local route)"
-    return 0
-  fi
-  printf 'z %s 0664 root video -\n' "$PLATFORM_PROFILE" | sudo tee "$GPU_TMPFILES" >/dev/null
-  sudo systemd-tmpfiles --create "$GPU_TMPFILES" >/dev/null 2>&1 || true
-  say "hardware: boot perms installed ($GPU_TMPFILES)"
-  id -nG | tr ' ' '\n' | grep -qx video \
-    || say "TODO: add yourself to the video group: sudo usermod -aG video $USER (re-login)"
-}
-
-remove_gpu_perms() {
-  if [ -f "$GPU_TMPFILES" ]; then
-    sudo rm -f "$GPU_TMPFILES"; say "removed: $GPU_TMPFILES"
-  fi
-}
-
 # --- item registry -----------------------------------------------------------
 
 items_of() {
@@ -509,7 +465,6 @@ items_of() {
     work-cli)  printf '%s\n' dvquery sqlcmd az func dotnet edge-fw teams outlook ;;
     tiles)     printf '%s\n' sys-tile snake-tile clock-tile rogue-tile ;;
     retro)     printf '%s\n' simcity apple2 rogue-dos arcade1 ;;
-    hardware)  printf '%s\n' gpu-profile gpu-profile-perms ;;
     *) : ;;  # inputrc, git — no sub-items
   esac
 }
@@ -558,8 +513,6 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
     retro/arcade1)
       printf '%s\t%s\n' "$REPO/bin/arcade1-mount" "$HOME/.local/bin/arcade1-mount"
       printf '%s\t%s\n' "$REPO/bin/arcade1-umount" "$HOME/.local/bin/arcade1-umount" ;;
-    hardware/gpu-profile)
-      printf '%s\t%s\n' "$REPO/hardware/gpu-profile" "$HOME/.local/bin/gpu-profile" ;;
   esac
 }
 
@@ -635,11 +588,6 @@ item_installed() { # <group> <item>
     nvim|nvim-work|tiles|retro)
       first="$(pairs_of "$g" "$i" | head -1 | cut -f2)"
       [ -n "$first" ] && points_into_repo "$first" ;;
-    hardware)
-      case "$i" in
-        gpu-profile)       points_into_repo "$HOME/.local/bin/gpu-profile" ;;
-        gpu-profile-perms) [ -f "$GPU_TMPFILES" ] ;;
-      esac ;;
     *) return 1 ;;
   esac
 }
@@ -724,15 +672,6 @@ install_item() { # <group> <item>
     tiles|retro)
       mkdir -p "$HOME/.local/bin"
       pairs_of "$g" "$i" | link_pairs ;;
-    hardware)
-      local why; why="$(hw_skip_reason)"
-      if [ -n "$why" ]; then say "skip hardware/$i — $why"; return 0; fi
-      case "$i" in
-        gpu-profile)
-          mkdir -p "$HOME/.local/bin"
-          pairs_of "$g" "$i" | link_pairs ;;
-        gpu-profile-perms) install_gpu_perms ;;
-      esac ;;
   esac
 }
 
@@ -770,11 +709,6 @@ remove_item() { # <group> <item>
     nvim|nvim-work|tiles|retro)
       pairs_of "$g" "$i" | unlink_pairs
       [ "$g" = nvim ] || [ "$g" = nvim-work ] && nvim_rmdirs || true ;;
-    hardware)  # never gated on the hardware check — see hw_skip_reason
-      case "$i" in
-        gpu-profile)       pairs_of "$g" "$i" | unlink_pairs ;;
-        gpu-profile-perms) remove_gpu_perms ;;
-      esac ;;
   esac
 }
 
@@ -1051,9 +985,6 @@ install_group() {
         || say "REMINDER: set identity: git config --global user.name/user.email"
       return ;;
     shell) shell_hook_add; rm -f "$SHELL_DISABLED" ;;
-    hardware)
-      why="$(hw_skip_reason)"
-      if [ -n "$why" ]; then say "hardware: skipped — $why"; return 0; fi ;;
     display)
       why="$(display_skip_reason)"
       if [ -n "$why" ]; then say "display: skipped — $why"; return 0; fi ;;
@@ -1196,8 +1127,7 @@ render() { # "key<TAB>display" lines for menu/list
 
 print_list() { render | cut -f2-; }
 
-# hardware is safe to list here: it self-skips on non-ASUS machines.
-DEFAULT_SET=(display packages shell inputrc git lazygit claude nvim tiles retro hardware)
+DEFAULT_SET=(display packages shell inputrc git lazygit claude nvim tiles retro)
 WORK_SET=(nvim-work work-cli)
 
 toggle_key() { # <group> or <group/item>
