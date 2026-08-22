@@ -57,4 +57,7 @@ if [[ -n "$SCALE" ]]; then
   fi
 fi
 
-exec linapple --conf "$CONF" -b --d1 "$DISK" "$@"
+# --config, not --conf: the flag is `-c, --config` (linapple --help). `--conf`
+# only works as a GNU getopt_long prefix abbreviation, which silently stops
+# working the day upstream adds any other --conf* option.
+exec linapple --config "$CONF" -b --d1 "$DISK" "$@"
