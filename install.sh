@@ -58,6 +58,7 @@ declare -A IDESC=(
   [nvim/lsp-extra]="bashls pyright jsonls yamlls"
   [nvim/db2]="password-manager tool"
   [nvim/dasm]="6502 completion + syntax"
+  [nvim/hex]="hex.nvim binary previewer (xxd view of .bin ROMs, :HexToggle)"
   [nvim-work/dadbod]="DB suite + formatter + dataverse adapter"
   [nvim-work/dap]="C#/netcoredbg debugging"
   [nvim-work/lsp-work]="omnisharp ts_ls angularls"
@@ -460,7 +461,7 @@ items_of() {
     display)   printf '%s\n' font text-size monitors idle clock libre-icons ;;   # font FIRST — see ORDER MATTERS above
     packages)  pkg_names; aur_names ;;
     shell)     printf '%s\n' aliases fzf-nav jcurl nnn prompt ;;
-    nvim)      printf '%s\n' lsp-extra db2 dasm ;;
+    nvim)      printf '%s\n' lsp-extra db2 dasm hex ;;
     nvim-work) printf '%s\n' dadbod dap lsp-work ;;
     work-cli)  printf '%s\n' dvquery sqlcmd az func dotnet edge-fw teams outlook ;;
     tiles)     printf '%s\n' sys-tile snake-tile clock-tile rogue-tile ;;
@@ -482,6 +483,8 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
       printf '%s\t%s\n' "$REPO/nvim/lua/dasm_complete.lua" "$NVCONF/lua/dasm_complete.lua"
       printf '%s\t%s\n' "$REPO/nvim/after/ftplugin/asm.lua" "$NVCONF/after/ftplugin/asm.lua"
       printf '%s\t%s\n' "$REPO/nvim/after/syntax/asm.vim" "$NVCONF/after/syntax/asm.vim" ;;
+    nvim/hex)
+      printf '%s\t%s\n' "$REPO/nvim/lua/plugins/hex.lua" "$NVCONF/lua/plugins/hex.lua" ;;
     nvim-work/dadbod)
       for f in "$REPO"/nvim/lua/plugins_work/dadbod*.lua; do
         printf '%s\t%s\n' "$f" "$NVCONF/lua/plugins/$(basename "$f")"

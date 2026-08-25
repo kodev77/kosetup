@@ -13,3 +13,5 @@ tmux
 neovim
 universal-ctags
 build-essential
+# xxd hex dump — backend for nvim/hex (hex.nvim binary previewer)
+xxd

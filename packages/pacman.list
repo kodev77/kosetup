@@ -13,3 +13,5 @@ tmux
 neovim
 ctags
 base-devel
+# tinyxxd provides /usr/bin/xxd — backend for nvim/hex (hex.nvim binary previewer)
+tinyxxd
