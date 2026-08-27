@@ -28,7 +28,7 @@ NVCONF="$HOME/.config/nvim"
 
 say() { printf '\033[1m[kosetup]\033[0m %s\n' "$*"; }
 
-KGROUPS=(display packages shell inputrc git lazygit claude nvim nvim-work work-cli tiles retro)
+KGROUPS=(display packages shell inputrc git lazygit tmux claude nvim nvim-work work-cli tiles retro)
 declare -A GDESC=(
   [display]="omarchy display: Berkeley Mono font + one-knob text scaling"
   [packages]="core CLI packages + fd/bat shims"
@@ -36,6 +36,7 @@ declare -A GDESC=(
   [inputrc]="~/.inputrc: case-insensitive completion, colored stats"
   [git]="git include.path: lg/lg2/lgf log aliases, work includeIf"
   [lazygit]="lazygit: flat file list, lg2 log format, theme-safe selection"
+  [tmux]="tmux: omarchy config minus C-b prefix2 (frees Ctrl+B for apps like lazygit)"
   [claude]="Claude Code: settings + persistent memory (skills come from omarchy; login stays per-machine)"
   [nvim]="nvim overlay (core)"
   [nvim-work]="nvim overlay (work)"
@@ -600,6 +601,7 @@ group_status() { # echoes 'x', '~' or ' '
   case "$g" in
     inputrc) points_into_repo "$HOME/.inputrc" && echo x || echo ' '; return ;;
     lazygit) points_into_repo "$HOME/.config/lazygit/config.yml" && echo x || echo ' '; return ;;
+    tmux) points_into_repo "$HOME/.config/tmux/tmux.conf" && echo x || echo ' '; return ;;
     claude)
       points_into_repo "$HOME/.claude/settings.json" && \
       points_into_repo "$HOME/.claude/projects/-home-ko/memory" && echo x || echo ' '; return ;;
@@ -965,6 +967,9 @@ install_group() {
     lazygit)
       mkdir -p "$HOME/.config/lazygit"
       link "$REPO/config/lazygit.yml" "$HOME/.config/lazygit/config.yml"; return ;;
+    tmux)
+      mkdir -p "$HOME/.config/tmux"
+      link "$REPO/config/tmux.conf" "$HOME/.config/tmux/tmux.conf"; return ;;
     claude)
       # Settings, user skills, and MEMORY live in the repo; ~/.claude points at
       # them. Memory is written by Claude during sessions, so new memories show
@@ -1112,6 +1117,7 @@ remove_group() {
   case "$g" in
     inputrc) unlink_repo "$HOME/.inputrc"; return ;;
     lazygit) unlink_repo "$HOME/.config/lazygit/config.yml"; return ;;
+    tmux) unlink_repo "$HOME/.config/tmux/tmux.conf"; return ;;
     claude)
       unlink_repo "$HOME/.claude/settings.json"
       unlink_repo "$HOME/.claude/projects/-home-ko/memory"
@@ -1156,7 +1162,7 @@ render() { # "key<TAB>display" lines for menu/list
 
 print_list() { render | cut -f2-; }
 
-DEFAULT_SET=(display packages shell inputrc git lazygit claude nvim tiles retro)
+DEFAULT_SET=(display packages shell inputrc git lazygit tmux claude nvim tiles retro)
 WORK_SET=(nvim-work work-cli)
 
 toggle_key() { # <group> or <group/item>
