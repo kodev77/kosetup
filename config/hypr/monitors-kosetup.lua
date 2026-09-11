@@ -89,6 +89,44 @@ local function first_line(path)
   return l
 end
 
+-- --- primary GPU: the ROG's external hangs off the NVIDIA card ---------------
+-- The ROG's HDMI port is wired to the discrete RTX (pci 01:00.0), but Hyprland
+-- defaults to the boot GPU -- the Intel iGPU -- so every frame shown on the
+-- external is composited on Intel, then copied across PCIe to the RTX for
+-- scanout. That copy tax reads as a sluggish desktop (Chrome especially) while
+-- CPU and memory look bored. Listing the RTX first makes it the primary; the
+-- built-in panel (on Intel) inherits the copy instead, which only matters
+-- while the panel is lit. by-path names, not cardN: card numbering can swap
+-- between boots. Gated on the DMI product name AND the device node existing,
+-- so the block is inert on every other machine -- the same contract as
+-- PANEL_OFF below. Applies at compositor START only: the GPU choice is made
+-- before the first frame, so a plain reload cannot change it -- log out and
+-- back in.
+do
+  -- AQ_DRM_DEVICES splits on ':' like PATH, so by-path names (which contain
+  -- colons) must NOT go in the value directly -- Hyprland would read garbage
+  -- fragments, find no GPU, and abort at startup (measured: login loop).
+  -- Resolve each symlink to its real /dev/dri/cardN at parse time instead:
+  -- colon-free, and still fresh on every start, so boot-order swaps of the
+  -- card numbers stay handled.
+  local function realpath(p)
+    local h = io.popen("readlink -f '" .. p .. "' 2>/dev/null")
+    if not h then return nil end
+    local out = (h:read("*a") or ""):gsub("%s+$", "")
+    h:close()
+    if out == "" or out:find(":", 1, true) then return nil end
+    return out
+  end
+  local product = first_line("/sys/class/dmi/id/product_name") or ""
+  if product:match("^ROG Zephyrus M16") then
+    local rtx  = realpath("/dev/dri/by-path/pci-0000:01:00.0-card")
+    local igpu = realpath("/dev/dri/by-path/pci-0000:00:02.0-card")
+    if rtx and igpu then
+      hl.env("AQ_DRM_DEVICES", rtx .. ":" .. igpu)
+    end
+  end
+end
+
 -- The laptops that want the panel dark under an external, each with the spec
 -- that drives it on the way back. Matched against DMI product_name; a machine
 -- absent from this table keeps omarchy's stock behaviour untouched.
