@@ -60,9 +60,11 @@ declare -A IDESC=(
   [nvim/db2]="password-manager tool"
   [nvim/dasm]="6502 completion + syntax"
   [nvim/hex]="hex.nvim binary previewer (xxd view of .bin ROMs, :HexToggle)"
+  [nvim/nav-light]="LSP-free nav: <leader>ss tree-sitter symbols (rg/picker keys are stock)"
+  [nvim/neotree-cd]="neo-tree . and <BS> also :cd (cwd follows tree root for <leader>sG/fF/sW)"
   [nvim-work/dadbod]="DB suite + formatter + dataverse adapter"
   [nvim-work/dap]="C#/netcoredbg debugging"
-  [nvim-work/lsp-work]="omnisharp ts_ls angularls"
+  [nvim-work/lsp-work]="omnisharp ts_ls angularls (on-demand: <leader>cL)"
   [work-cli/dvquery]="Dataverse SQL CLI (venv)"
   [work-cli/sqlcmd]="pymssql wrapper (venv)"
   [work-cli/az]="Azure CLI (az login / az functionapp ...)"
@@ -462,7 +464,7 @@ items_of() {
     display)   printf '%s\n' font text-size monitors idle clock libre-icons ;;   # font FIRST — see ORDER MATTERS above
     packages)  pkg_names; aur_names ;;
     shell)     printf '%s\n' aliases fzf-nav jcurl nnn prompt ;;
-    nvim)      printf '%s\n' lsp-extra db2 dasm hex ;;
+    nvim)      printf '%s\n' lsp-extra db2 dasm hex nav-light neotree-cd ;;
     nvim-work) printf '%s\n' dadbod dap lsp-work ;;
     work-cli)  printf '%s\n' dvquery sqlcmd az func dotnet edge-fw teams outlook ;;
     tiles)     printf '%s\n' sys-tile snake-tile clock-tile rogue-tile ;;
@@ -486,6 +488,10 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
       printf '%s\t%s\n' "$REPO/nvim/after/syntax/asm.vim" "$NVCONF/after/syntax/asm.vim" ;;
     nvim/hex)
       printf '%s\t%s\n' "$REPO/nvim/lua/plugins/hex.lua" "$NVCONF/lua/plugins/hex.lua" ;;
+    nvim/nav-light)
+      printf '%s\t%s\n' "$REPO/nvim/lua/plugins/nav-light.lua" "$NVCONF/lua/plugins/nav-light.lua" ;;
+    nvim/neotree-cd)
+      printf '%s\t%s\n' "$REPO/nvim/lua/plugins/neotree-cd.lua" "$NVCONF/lua/plugins/neotree-cd.lua" ;;
     nvim-work/dadbod)
       for f in "$REPO"/nvim/lua/plugins_work/dadbod*.lua; do
         printf '%s\t%s\n' "$f" "$NVCONF/lua/plugins/$(basename "$f")"
@@ -499,7 +505,8 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
     nvim-work/dap)
       printf '%s\t%s\n' "$REPO/nvim/lua/plugins_work/dap.lua" "$NVCONF/lua/plugins/dap.lua" ;;
     nvim-work/lsp-work)
-      printf '%s\t%s\n' "$REPO/nvim/lua/plugins_work/lsp-work.lua" "$NVCONF/lua/plugins/lsp-work.lua" ;;
+      printf '%s\t%s\n' "$REPO/nvim/lua/plugins_work/lsp-work.lua" "$NVCONF/lua/plugins/lsp-work.lua"
+      printf '%s\t%s\n' "$REPO/nvim/after/queries/c_sharp/locals.scm" "$NVCONF/after/queries/c_sharp/locals.scm" ;;
     tiles/sys-tile|tiles/snake-tile|tiles/clock-tile)
       printf '%s\t%s\n' "$REPO/tiles/$i" "$HOME/.local/bin/$i" ;;
     tiles/rogue-tile)
