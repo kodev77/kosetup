@@ -17,3 +17,9 @@ fi
 # default editor = nvim. nnn/git/etc. read these; nnn prefers $VISUAL then $EDITOR.
 export VISUAL=nvim
 export EDITOR=nvim
+
+# vim / vi -> nvim, for hands that still type the old name (vim itself is not
+# installed on omarchy). Bare `vim` opens the current folder, like omarchy's n().
+# Functions, not aliases: an alias can't do the no-args branch.
+vim() { if [ "$#" -eq 0 ]; then command nvim . ; else command nvim "$@"; fi; }
+vi() { vim "$@"; }

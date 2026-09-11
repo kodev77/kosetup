@@ -39,8 +39,11 @@ nnn() {
   fi
   [ ! -f "$NNN_TMPFILE" ] || { . "$NNN_TMPFILE"; rm -f -- "$NNN_TMPFILE"; }
 }
-# Deliberately NO `alias n=nnn`. Bash expands aliases before it looks up
-# functions, so that alias shadowed omarchy's own n() (open nvim here) — and the
-# shorthand bought nothing, since the nnn function above already shadows the
-# binary. Type `nnn`. Do not re-add it.
+# n -> nnn. This deliberately REPLACES omarchy's n() (open nvim here): kosetup
+# is sourced after omarchy's defaults, so a function of the same name wins.
+# nvim keeps `vim`/`vi` (aliases.bash) and plain `nvim`. A function, not an
+# alias, so it can't be out-expanded by anything omarchy adds later. Only
+# defined on machines with nnn (init.bash gates this file on the binary), so
+# elsewhere `n` stays omarchy's nvim shortcut.
+n() { nnn "$@"; }
 # raw nnn without the wrapper (no cd-on-quit / inline preview): use `command nnn`
