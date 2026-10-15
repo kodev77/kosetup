@@ -19,7 +19,7 @@ export VISUAL=nvim
 export EDITOR=nvim
 
 # vim / vi -> nvim, for hands that still type the old name (vim itself is not
-# installed on omarchy). Bare `vim` opens the current folder, like omarchy's n().
-# Functions, not aliases: an alias can't do the no-args branch.
-vim() { if [ "$#" -eq 0 ]; then command nvim . ; else command nvim "$@"; fi; }
-vi() { vim "$@"; }
+# installed on omarchy). Plain pass-through: bare `vim` lands on the dashboard
+# exactly like bare `nvim` (not `nvim .` — that opens neo-tree on the cwd).
+vim() { command nvim "$@"; }
+vi() { command nvim "$@"; }
