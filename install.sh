@@ -71,6 +71,7 @@ declare -A IDESC=(
   [work-cli/func]="Azure Functions Core Tools (func start)"
   [work-cli/dotnet]="dotnet SDK, ASP.NET packs, Artifacts credprovider, dev-cert trust (JobTracker)"
   [work-cli/edge-fw]="ufw: allow docker containers -> host edge dev ports (5000/5002/5100/6000)"
+  [work-cli/docker-nm]="NetworkManager: leave docker0/br-*/veth* unmanaged (dev-stack teardown churn killed Teams)"
   [work-cli/teams]="teams-for-linux: Teams with REAL desktop notifications + tray"
   [work-cli/outlook]="Outlook as an omarchy web app (app-mode window + launcher entry)"
   [retro/simcity]="simcity-1989/1994/2000"
@@ -466,7 +467,7 @@ items_of() {
     shell)     printf '%s\n' aliases fzf-nav jcurl nnn prompt ;;
     nvim)      printf '%s\n' lsp-extra db2 dasm hex nav-light neotree-cd ;;
     nvim-work) printf '%s\n' dadbod dap lsp-work ;;
-    work-cli)  printf '%s\n' dvquery sqlcmd az func dotnet edge-fw teams outlook ;;
+    work-cli)  printf '%s\n' dvquery sqlcmd az func dotnet edge-fw docker-nm teams outlook ;;
     tiles)     printf '%s\n' sys-tile snake-tile clock-tile rogue-tile ;;
     retro)     printf '%s\n' simcity apple2 rogue-dos arcade1 ;;
     *) : ;;  # inputrc, git — no sub-items
@@ -592,6 +593,8 @@ item_installed() { # <group> <item>
         dotnet) dotnet --list-sdks 2>/dev/null | grep -q . && \
                 [ -f "$HOME/.nuget/plugins/netcore/CredentialProvider.Microsoft/CredentialProvider.Microsoft.dll" ] ;;
         edge-fw) [ -f "$STATE_DIR/edge-fw" ] ;;
+        docker-nm) [ -f /etc/NetworkManager/conf.d/kosetup-docker-unmanaged.conf ] \
+                   || [ -f "$STATE_DIR/docker-nm" ] ;;
         teams)   command -v teams-for-linux >/dev/null 2>&1 ;;
         outlook) [ -f "$HOME/.local/share/applications/Outlook.desktop" ] ;;
         *) [ -f "$HOME/.local/bin/$i" ] && grep -q 'kosetup exec stub' "$HOME/.local/bin/$i" 2>/dev/null ;;
@@ -851,6 +854,25 @@ install_workcli_tool() { # dvquery | sqlcmd | az | func
           || say "WARN: ufw rule failed — run manually with sudo"
       fi
       return 0 ;;
+    docker-nm)
+      # NetworkManager must not manage docker's bridges/veths — see the header
+      # of config/NetworkManager/docker-unmanaged.conf for the measured why.
+      # Copied (not symlinked): root must not follow a link into $HOME. Gated
+      # on NM + docker being present so it is inert on machines without them;
+      # the state marker records "checked, not needed" for the [x] display.
+      local _nmdst=/etc/NetworkManager/conf.d/kosetup-docker-unmanaged.conf
+      if ! command -v nmcli >/dev/null 2>&1 || ! command -v docker >/dev/null 2>&1; then
+        say "work: NetworkManager or docker absent — no unmanaged rule needed"
+        mkdir -p "$STATE_DIR"; touch "$STATE_DIR/docker-nm"
+      elif [ -f "$_nmdst" ] && cmp -s "$REPO/config/NetworkManager/docker-unmanaged.conf" "$_nmdst"; then
+        say "work: NetworkManager docker-unmanaged rule already in place"
+      else
+        sudo install -m 0644 -o root -g root "$REPO/config/NetworkManager/docker-unmanaged.conf" "$_nmdst" \
+          && sudo nmcli general reload conf 2>/dev/null \
+          && say "work: NetworkManager now ignores docker0/br-*/veth* ($_nmdst)" \
+          || say "WARN: could not install $_nmdst — run manually with sudo"
+      fi
+      return 0 ;;
     func)
       if command -v func >/dev/null 2>&1; then say "work: func present"
       elif [ "$PM" = pacman ] && command -v yay >/dev/null 2>&1; then
@@ -935,6 +957,14 @@ remove_workcli_tool() {
         say "work: edge firewall rule removed"
       fi
       rm -f "$STATE_DIR/edge-fw"
+      return 0 ;;
+    docker-nm)
+      if [ -f /etc/NetworkManager/conf.d/kosetup-docker-unmanaged.conf ]; then
+        sudo rm -f /etc/NetworkManager/conf.d/kosetup-docker-unmanaged.conf \
+          && sudo nmcli general reload conf 2>/dev/null \
+          && say "work: NetworkManager docker-unmanaged rule removed"
+      fi
+      rm -f "$STATE_DIR/docker-nm"
       return 0 ;;
     dotnet)
       local _p
