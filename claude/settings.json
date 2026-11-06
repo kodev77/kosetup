@@ -1,9 +1,9 @@
 {
   "permissions": {
-    "defaultMode": "auto",
     "allow": [
       "Bash(git commit:*)"
-    ]
+    ],
+    "defaultMode": "auto"
   },
   "tui": "fullscreen",
   "skipDangerousModePermissionPrompt": true,
@@ -35,5 +35,6 @@
       "**Org-specific CLIs**: None configured",
       "No routine \"under <user>/ prefix\" qualifiers found in evidence"
     ]
-  }
+  },
+  "skipWorkflowUsageWarning": true
 }
