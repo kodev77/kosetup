@@ -70,6 +70,16 @@ local function displaywidth(str)
   return vim.fn.strdisplaywidth(str)
 end
 
+-- How a cell shows inside the one-line table: a multi-line value (psql text with
+-- embedded newlines) gets a visible ↵ per break. The full value, real newlines
+-- intact, stays in dbout_all_rows / dbout_cell_data for the expand window.
+local function cell_display(val)
+  if not val:find("\n", 1, true) then
+    return val
+  end
+  return (val:gsub("\n", " ↵ "))
+end
+
 local function split_and_trim(line, delim)
   local parts = vim.split(line, delim, { plain = true })
   -- Trim each part
@@ -315,7 +325,79 @@ local function parse_fixed_width(lines)
   return result
 end
 
+-- psql's aligned format. A value with embedded newlines spans several output
+-- lines: psql puts a `+` in the cell's trailing pad slot (just before its `|`,
+-- or after a space at the end of the last column) and prints the rest of the
+-- value on the next line with the other cells blank. The generic `|` parser
+-- drops those leading blank cells, so the remainder slid into column 1 as a
+-- bogus row. Here each continuation is folded back into the row above, the
+-- broken cells joined with real newlines. psql shows a CR as a literal `\r`, so
+-- `\r` right before a break (CRLF data) is dropped. Returns nil when this isn't
+-- psql output, or a line's `|` count doesn't match the header (a value holding
+-- a `|`), so the caller falls back to the generic parser.
+local function parse_psql(lines)
+  local sep_idx
+  for i, line in ipairs(lines) do
+    if line:match("^%-+%+[-+]*%-$") then
+      sep_idx = i
+      break
+    end
+  end
+  if not sep_idx or sep_idx < 2 then
+    return nil
+  end
+
+  local headers = split_and_trim(lines[sep_idx - 1], "|")
+  local ncols = #headers
+  if ncols < 2 or #vim.split(lines[sep_idx - 1], "|", { plain = true }) ~= ncols then
+    return nil
+  end
+
+  local rows = {}
+  local wrapped = nil -- markers of the previous line, while a row continues
+  for i = sep_idx + 1, #lines do
+    local line = lines[i]
+    if line:match("^%s*%(%d+%s+rows?%)%s*$") then
+      break
+    end
+    if vim.trim(line) == "" then
+      goto continue
+    end
+    local parts = vim.split(line, "|", { plain = true })
+    if #parts ~= ncols then
+      return nil
+    end
+    local vals, marks, any = {}, {}, false
+    for j, raw in ipairs(parts) do
+      local plus = (j < ncols and raw:sub(-1) == "+") or (j == ncols and raw:match(" %+$") ~= nil)
+      vals[j] = vim.trim(plus and raw:sub(1, -2) or raw)
+      marks[j] = plus
+      any = any or plus
+    end
+    if wrapped and #rows > 0 then
+      local row = rows[#rows]
+      for j = 1, ncols do
+        if wrapped[j] then
+          row[j] = row[j]:gsub("\\r$", "") .. "\n" .. vals[j]
+        end
+      end
+    else
+      rows[#rows + 1] = vals
+    end
+    wrapped = any and marks or nil
+    ::continue::
+  end
+
+  return { headers = headers, rows = rows }
+end
+
 local function parse_output(lines)
+  -- psql aligned output (handles values that span lines)
+  local psql = parse_psql(lines)
+  if psql and #psql.rows > 0 then
+    return psql
+  end
+
   -- First, try explicit MySQL format detection
   local has_mysql_border = false
   local has_pipe_data = false
@@ -580,7 +662,7 @@ local function analyze_columns(headers, rows)
 
     for _, row in ipairs(rows) do
       if i <= #row then
-        actual_max = math.max(actual_max, displaywidth(row[i]))
+        actual_max = math.max(actual_max, displaywidth(cell_display(row[i])))
       end
     end
 
@@ -610,7 +692,7 @@ local function truncate_value(val, max_width, col_type)
 
   -- Default: truncate end with ellipsis
   -- Use vim.fn.strcharpart for multi-byte safety
-  local truncated = vim.fn.strpart(val, 0, max_width - 3)
+  local truncated = vim.fn.strcharpart(val, 0, max_width - 3)
   return truncated .. "..."
 end
 
@@ -630,13 +712,15 @@ local function truncate_data_with_offset(headers, rows, col_info, row_offset)
       local max_w = col_info.widths[i] or max_widths["default"] or 40
       local col_type = col_info.types[i] or "default"
 
-      -- Store original if truncated
-      if displaywidth(val) > max_w then
+      local shown = cell_display(val)
+
+      -- Store original if truncated or reshaped (multi-line -> ↵)
+      if shown ~= val or displaywidth(shown) > max_w then
         local key = row_num .. ":" .. (i - 1)
         vim.b.dbout_cell_data[key] = val
       end
 
-      new_row[i] = truncate_value(val, max_w, col_type)
+      new_row[i] = truncate_value(shown, max_w, col_type)
     end
     result.rows[#result.rows + 1] = new_row
     row_num = row_num + 1
@@ -649,10 +733,13 @@ end
 -- TABLE RENDERING
 -- ============================================================================
 
-local function pad_value(val, width)
+local function pad_value(val, width, right)
   local len = displaywidth(val)
   if len >= width then
     return val
+  end
+  if right then
+    return string.rep(" ", width - len) .. val
   end
   return val .. string.rep(" ", width - len)
 end
@@ -674,22 +761,25 @@ local function make_border_line(position, widths)
   return left .. table.concat(parts, mid) .. right
 end
 
-local function make_data_line(values, widths)
+-- Number columns (header included) are right-aligned, like a spreadsheet.
+-- Highlighting and <CR> expand find each value by its non-blank text, so the
+-- side the padding goes on doesn't matter to them.
+local function make_data_line(values, widths, types)
   local parts = {}
   for i, w in ipairs(widths) do
     local val = values[i] or ""
-    parts[i] = " " .. pad_value(val, w) .. " "
+    parts[i] = " " .. pad_value(val, w, types and types[i] == "number") .. " "
   end
   return box.v .. table.concat(parts, box.v) .. box.v
 end
 
-local function render_table(headers, rows, widths)
+local function render_table(headers, rows, widths, types)
   local lines = {}
   lines[#lines + 1] = make_border_line("top", widths)
-  lines[#lines + 1] = make_data_line(headers, widths)
+  lines[#lines + 1] = make_data_line(headers, widths, types)
   lines[#lines + 1] = make_border_line("middle", widths)
   for _, row in ipairs(rows) do
-    lines[#lines + 1] = make_data_line(row, widths)
+    lines[#lines + 1] = make_data_line(row, widths, types)
   end
   lines[#lines + 1] = make_border_line("bottom", widths)
   return lines
@@ -1385,7 +1475,9 @@ function M.format()
 
   -- Error output: dim it (instead of leaving it default-white) and stop.
   local content = table.concat(lines, "\n")
+  -- psql running a query file prefixes errors with it: "psql:/tmp/…/3.sql:1: ERROR: …"
   local is_error = first_line:match("^[Mm]sg%s") or first_line:match("^ERROR") or first_line:match("^[Ee]rror:")
+    or first_line:match("^psql:.-:%d+: ERROR:") or first_line:match("^psql:.-:%d+: FATAL:")
     or first_line:match("^failed") or first_line:match("^ORA%-") or first_line:match("^PLS%-")
     or first_line:match("^SP2%-") or first_line:match("^SQL Error")
     or content:match("Msg%s+%d+.*Level%s+%d+")
@@ -1412,6 +1504,10 @@ function M.format()
   vim.b.dbout_col_info_list = {}
   vim.b.dbout_table_data_lines = {}
   vim.b.dbout_header_lines = {}
+  -- Shown on the status line (plugins_work/dadbod-statusline.lua)
+  vim.b.dbout_row_count = nil
+  vim.b.dbout_table_count = nil
+  local table_count, total_rows, caption_idx = 0, 0, nil
 
   -- Split into multiple result sets
   local result_sets = split_result_sets(lines)
@@ -1510,7 +1606,7 @@ function M.format()
     local truncated = truncate_data_with_offset(parsed.headers, parsed.rows, col_info, global_row_offset)
 
     -- Render bordered table
-    local formatted = render_table(truncated.headers, truncated.rows, col_info.widths)
+    local formatted = render_table(truncated.headers, truncated.rows, col_info.widths, col_info.types)
 
     -- Separate from any previous output (avoid stacking blank lines)
     if #all_formatted > 0 and all_formatted[#all_formatted] ~= "" then
@@ -1542,10 +1638,28 @@ function M.format()
     -- Table first, then the caption beneath it, then a blank for breathing room.
     vim.list_extend(all_formatted, formatted)
     all_formatted[#all_formatted + 1] = caption
+    caption_idx = #all_formatted
     all_formatted[#all_formatted + 1] = ""
     global_row_offset = global_row_offset + #parsed.rows
+    table_count = table_count + 1
+    total_rows = total_rows + row_count
 
     ::continue_set::
+  end
+
+  -- The row count moves to the status line. With one table its caption line is
+  -- dropped; with several, each caption stays to name its table. Nothing but
+  -- trailing status lines follows a caption, so no tracked line numbers move.
+  -- No table (DELETE/UPDATE/...) leaves the message as the whole result.
+  if table_count > 0 then
+    vim.b.dbout_row_count = total_rows
+    vim.b.dbout_table_count = table_count
+    if table_count == 1 and caption_idx then
+      table.remove(all_formatted, caption_idx)
+      if all_formatted[caption_idx] == "" and all_formatted[caption_idx - 1] == "" then
+        table.remove(all_formatted, caption_idx)
+      end
+    end
   end
 
   if #all_formatted == 0 then

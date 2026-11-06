@@ -11,17 +11,43 @@ return {
     --
     -- All data values are blue (slot 12); NULLs, borders, header names and the
     -- row-count caption are dim (slot 8). No green/default-fg colours remain.
+    --
+    -- With termguicolors on (LazyVim, Omarchy) ctermfg is ignored and all of
+    -- the above showed as the bright normal text. So each group also gets a
+    -- gui colour taken from the current theme: data is the normal text colour
+    -- softened 75% of the way from the background, the dim groups use the
+    -- theme's Comment colour. Omarchy themes are transparent (Normal has no
+    -- bg), so the blend falls back to black/white by 'background'.
+    local function theme_colors()
+      local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
+      local comment = vim.api.nvim_get_hl(0, { name = "Comment", link = false })
+      local fg = normal.fg or (vim.o.background == "light" and 0x000000 or 0xffffff)
+      local bg = normal.bg or (vim.o.background == "light" and 0xffffff or 0x000000)
+      local function mix(a, b, t) -- t of a, the rest of b, per channel
+        local out = 0
+        for shift = 16, 0, -8 do
+          local ca, cb = bit.band(bit.rshift(a, shift), 0xff), bit.band(bit.rshift(b, shift), 0xff)
+          out = out + bit.lshift(math.floor(ca * t + cb * (1 - t) + 0.5), shift)
+        end
+        return string.format("#%06x", out)
+      end
+      local data = mix(fg, bg, 0.75)
+      local dim = comment.fg and string.format("#%06x", comment.fg) or mix(fg, bg, 0.5)
+      return data, dim
+    end
+
     local function set_dbout_highlights()
-      vim.api.nvim_set_hl(0, "DboutString", { ctermfg = 12 })    -- blue
-      vim.api.nvim_set_hl(0, "DboutGuid", { ctermfg = 12 })      -- blue
-      vim.api.nvim_set_hl(0, "DboutTimestamp", { ctermfg = 12 }) -- blue (date/datetime)
-      vim.api.nvim_set_hl(0, "DboutNumber", { ctermfg = 12 })    -- blue
-      vim.api.nvim_set_hl(0, "DboutTruncated", { ctermfg = 12 }) -- blue (truncated data)
-      vim.api.nvim_set_hl(0, "DboutNull", { ctermfg = 8, italic = true }) -- dim + italic
-      vim.api.nvim_set_hl(0, "DboutBorder", { ctermfg = 8 })     -- dim
-      vim.api.nvim_set_hl(0, "DboutHeader", { ctermfg = 8, bold = true }) -- dim + bold
-      vim.api.nvim_set_hl(0, "DboutRowCount", { ctermfg = 8, italic = true }) -- dim italic caption
-      vim.api.nvim_set_hl(0, "DboutError", { ctermfg = 8 }) -- dim error messages
+      local data, dim = theme_colors()
+      vim.api.nvim_set_hl(0, "DboutString", { ctermfg = 12, fg = data })    -- blue
+      vim.api.nvim_set_hl(0, "DboutGuid", { ctermfg = 12, fg = data })      -- blue
+      vim.api.nvim_set_hl(0, "DboutTimestamp", { ctermfg = 12, fg = data }) -- blue (date/datetime)
+      vim.api.nvim_set_hl(0, "DboutNumber", { ctermfg = 12, fg = data })    -- blue
+      vim.api.nvim_set_hl(0, "DboutTruncated", { ctermfg = 12, fg = data }) -- blue (truncated data)
+      vim.api.nvim_set_hl(0, "DboutNull", { ctermfg = 8, fg = dim, italic = true }) -- dim + italic
+      vim.api.nvim_set_hl(0, "DboutBorder", { ctermfg = 8, fg = dim })     -- dim
+      vim.api.nvim_set_hl(0, "DboutHeader", { ctermfg = 8, fg = dim, bold = true }) -- dim + bold
+      vim.api.nvim_set_hl(0, "DboutRowCount", { ctermfg = 8, fg = dim, italic = true }) -- dim italic caption
+      vim.api.nvim_set_hl(0, "DboutError", { ctermfg = 8, fg = dim }) -- dim error messages
     end
     set_dbout_highlights()
     vim.api.nvim_create_autocmd("ColorScheme", {
@@ -62,6 +88,8 @@ return {
         local fmt = require("util.dadbod-format")
         vim.bo.modifiable = true
         vim.wo.foldenable = false
+        -- No snacks indent guides: a "^" error marker or indented line would get a │
+        vim.b.snacks_indent = false
         fmt.auto_format()
         fmt.setup_frozen_headers(vim.api.nvim_get_current_buf())
         vim.keymap.set("n", "<CR>", fmt.expand_cell, { buffer = true, desc = "Expand cell" })
