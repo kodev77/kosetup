@@ -14,6 +14,10 @@ export NNN_COLORS='2136'                          # the 4 context-tab colours (a
 export NNN_SPLIT='v'   # force side-by-side preview (preview pane always on right)
 # mouse-scrollable preview: --mouse lets less take the wheel so tmux forwards it
 export NNN_PAGER='less -P?n -R -C -S --mouse --wheel-lines=3'  # -S: chop long lines
+# Enter routes through bin/nnn-open: .md -> leaf, other text -> $EDITOR, rest ->
+# xdg-open. Needs -c (run it in the terminal) and NOT -e (which sends text files
+# straight to $EDITOR, skipping the opener). `e` still edits in $EDITOR.
+command -v nnn-open >/dev/null 2>&1 && export NNN_OPENER=nnn-open
 
 # cd-on-quit + auto-tmux: typing `nnn` (this function shadows the binary) quits into
 # its last dir. preview-tui (;p) needs a multiplexer to draw an INLINE split, so when
@@ -24,18 +28,22 @@ nnn() {
   [ "${NNNLVL:-0}" -eq 0 ] || { echo "nnn is already running"; return; }
   export NNN_TMPFILE="${XDG_CONFIG_HOME:-$HOME/.config}/nnn/.lastd"
   local nconf="${XDG_CONFIG_HOME:-$HOME/.config}/nnn/nnn.tmux.conf"
+  # -c: run NNN_OPENER (nnn-open) in the terminal. Without the opener installed,
+  # fall back to -e: text files straight into $EDITOR, as before.
+  local flag=e; [ -n "${NNN_OPENER:-}" ] && flag=c
   if [ -z "$TMUX" ] && [ -f "$nconf" ] && command -v tmux >/dev/null 2>&1; then
     # Pass NNN_* env per-session (-e): the long-lived -L nnn server captures its
     # global env once at start; -e overrides that regardless of server age.
     local nenv=()
     [ -n "${NNN_FCOLORS:-}" ] && nenv+=(-e "NNN_FCOLORS=$NNN_FCOLORS")
     [ -n "${NNN_COLORS:-}" ]  && nenv+=(-e "NNN_COLORS=$NNN_COLORS")
+    [ -n "${NNN_OPENER:-}" ]  && nenv+=(-e "NNN_OPENER=$NNN_OPENER")
     # on quit the tmux client prints a hardcoded "[exited]" line (no option to
     # silence it in 3.5a) — erase it, but only on clean exit so real errors stay
-    tmux -L nnn -f "$nconf" new-session -d "${nenv[@]}" "command nnn -ae $(printf '%q ' "$@")" \; attach \
+    tmux -L nnn -f "$nconf" new-session -d "${nenv[@]}" "command nnn -a$flag $(printf '%q ' "$@")" \; attach \
       && printf '\033[A\033[2K'
   else
-    command nnn -ae "$@"  # -a: per-instance preview FIFO; -e: text files in $EDITOR
+    command nnn -a"$flag" "$@"  # -a: per-instance preview FIFO
   fi
   [ ! -f "$NNN_TMPFILE" ] || { . "$NNN_TMPFILE"; rm -f -- "$NNN_TMPFILE"; }
 }

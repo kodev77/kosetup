@@ -62,6 +62,7 @@ declare -A IDESC=(
   [nvim/hex]="hex.nvim binary previewer (xxd view of .bin ROMs, :HexToggle)"
   [nvim/nav-light]="LSP-free nav: <leader>ss tree-sitter symbols (rg/picker keys are stock)"
   [nvim/neotree-cd]="neo-tree . and <BS> also :cd (cwd follows tree root for <leader>sG/fF/sW)"
+  [nvim/no-trail-dash]="trailing spaces show as spaces, not - (tab/nbsp markers kept)"
   [nvim-work/dadbod]="DB suite + formatter + dataverse adapter"
   [nvim-work/dap]="C#/netcoredbg debugging"
   [nvim-work/lsp-work]="omnisharp ts_ls angularls (on-demand: <leader>cL)"
@@ -465,7 +466,7 @@ items_of() {
     display)   printf '%s\n' font text-size monitors idle clock libre-icons ;;   # font FIRST — see ORDER MATTERS above
     packages)  pkg_names; aur_names ;;
     shell)     printf '%s\n' aliases fzf-nav jcurl nnn prompt ;;
-    nvim)      printf '%s\n' lsp-extra db2 dasm hex nav-light neotree-cd ;;
+    nvim)      printf '%s\n' lsp-extra db2 dasm hex nav-light neotree-cd no-trail-dash ;;
     nvim-work) printf '%s\n' dadbod dap lsp-work ;;
     work-cli)  printf '%s\n' dvquery sqlcmd az func dotnet edge-fw docker-nm teams outlook ;;
     tiles)     printf '%s\n' sys-tile snake-tile clock-tile rogue-tile ;;
@@ -493,6 +494,8 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
       printf '%s\t%s\n' "$REPO/nvim/lua/plugins/nav-light.lua" "$NVCONF/lua/plugins/nav-light.lua" ;;
     nvim/neotree-cd)
       printf '%s\t%s\n' "$REPO/nvim/lua/plugins/neotree-cd.lua" "$NVCONF/lua/plugins/neotree-cd.lua" ;;
+    nvim/no-trail-dash)
+      printf '%s\t%s\n' "$REPO/nvim/lua/plugins/no-trail-dash.lua" "$NVCONF/lua/plugins/no-trail-dash.lua" ;;
     nvim-work/dadbod)
       for f in "$REPO"/nvim/lua/plugins_work/dadbod*.lua; do
         printf '%s\t%s\n' "$f" "$NVCONF/lua/plugins/$(basename "$f")"
@@ -502,7 +505,8 @@ pairs_of() { # pairs_of <group> <item> → "repo-file<TAB>abs-dest" lines
       for f in "$REPO"/nvim/lua/util/dadbod-tables/*.lua; do
         printf '%s\t%s\n' "$f" "$NVCONF/lua/util/dadbod-tables/$(basename "$f")"
       done
-      printf '%s\t%s\n' "$REPO/nvim/autoload/db/adapter/dataverse.vim" "$NVCONF/autoload/db/adapter/dataverse.vim" ;;
+      printf '%s\t%s\n' "$REPO/nvim/autoload/db/adapter/dataverse.vim" "$NVCONF/autoload/db/adapter/dataverse.vim"
+      printf '%s\t%s\n' "$REPO/nvim/autoload/db/adapter/kopsql.vim" "$NVCONF/autoload/db/adapter/kopsql.vim" ;;
     nvim-work/dap)
       printf '%s\t%s\n' "$REPO/nvim/lua/plugins_work/dap.lua" "$NVCONF/lua/plugins/dap.lua" ;;
     nvim-work/lsp-work)
@@ -679,7 +683,9 @@ install_item() { # <group> <item>
         mkdir -p "$STATE_DIR"; items_of shell > "$SHELL_DISABLED"
       fi
       shell_hook_add; shell_mod_enable "$i"
-      [ "$i" = nnn ] && { mkdir -p "$HOME/.config/nnn"; link "$REPO/config/nnn.tmux.conf" "$HOME/.config/nnn/nnn.tmux.conf"; } || true ;;
+      [ "$i" = nnn ] && { mkdir -p "$HOME/.config/nnn" "$HOME/.local/bin"
+        link "$REPO/config/nnn.tmux.conf" "$HOME/.config/nnn/nnn.tmux.conf"
+        link "$REPO/bin/nnn-open" "$HOME/.local/bin/nnn-open"; } || true ;;
     work-cli) install_workcli_tool "$i" ;;
     nvim|nvim-work)
       nvim_base_ok || return 0
@@ -719,7 +725,8 @@ remove_item() { # <group> <item>
         say "package '$i' was not installed by kosetup — leaving it alone"
       fi ;;
     shell) shell_mod_disable "$i"
-           [ "$i" = nnn ] && unlink_repo "$HOME/.config/nnn/nnn.tmux.conf" || true ;;
+           [ "$i" = nnn ] && { unlink_repo "$HOME/.config/nnn/nnn.tmux.conf"
+             unlink_repo "$HOME/.local/bin/nnn-open"; } || true ;;
     work-cli) remove_workcli_tool "$i" ;;
     nvim|nvim-work|tiles|retro)
       pairs_of "$g" "$i" | unlink_pairs
@@ -1172,6 +1179,7 @@ remove_group() {
       fi
       rm -f "$SHELL_DISABLED"
       unlink_repo "$HOME/.config/nnn/nnn.tmux.conf"
+      unlink_repo "$HOME/.local/bin/nnn-open"
       return ;;
     packages)
       local reply

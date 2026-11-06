@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# nnn's opener (NNN_OPENER, see shell/nnn.bash): Enter on a file lands here.
+#   .md        -> leaf (read-only Markdown view; nnn's `e` key still edits in $EDITOR)
+#   other text -> $VISUAL/$EDITOR (what nnn's old -e flag did)
+#   the rest   -> xdg-open (nnn's default opener)
+set -uo pipefail
+f="${1:?usage: nnn-open FILE}"
+case "${f,,}" in
+  *.md|*.markdown)
+    command -v leaf >/dev/null 2>&1 && exec leaf "$f" ;;
+esac
+case "$(file -bL --mime-type -- "$f")" in
+  text/*|application/json|application/javascript|application/x-shellscript|inode/x-empty)
+    exec "${VISUAL:-${EDITOR:-vi}}" "$f" ;;
+esac
+exec xdg-open "$f" >/dev/null 2>&1
