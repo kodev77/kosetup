@@ -154,14 +154,12 @@ vbar_row() {
   for ((i=0; i<w; i++)); do cells+="$ch"; done
   printf '%s│%s%s%s│%s' "$D" "$col" "$cells" "$D" "$R"
 }
-# Three ascending signal bars for percent $1 (lit=accent, unlit=dim).
-sigbars() {
-  local pct=$1 lit i out="" g=("▃" "▅" "▇")
-  lit=$(( (pct * 3 + 99) / 100 )); (( lit > 3 )) && lit=3; (( lit < 0 )) && lit=0
-  # lit bars rise at $A; empty slots reuse the gauges' own ░ track glyph at $D, so EVERY background
-  # track in the tile is byte-identical (a dense ▇ can't be color-dimmed to match a sparse ░ across fonts)
-  for ((i=0; i<3; i++)); do (( i < lit )) && out+="$A${g[i]}" || out+="$D░"; done
-  printf '%s%s' "$out" "$R"
+# Wifi fan icon for signal percent $1 (nerd-font, 1 cell + 2 pad = the old 3-bar width):
+# arcs fill per 20% step; $2=1 when the link is up, else dim crossed-out fan.
+wifiicon() {
+  local g=("󰤯" "󰤟" "󰤢" "󰤥" "󰤨") n=$(( $1 / 20 ))
+  (( n > 4 )) && n=4; (( n < 0 )) && n=0
+  if (( $2 )); then printf '%s%s%s  ' "$A" "${g[n]}" "$R"; else printf '%s󰤮%s  ' "$D" "$R"; fi
 }
 # Human byte-rate from a byte delta ($1) over an interval in seconds ($2).
 # Compact: <10 keeps one decimal (8.1M), else integer (82M, 1023K) -> max 5 chars.
@@ -216,10 +214,20 @@ if [ -n "${I915_DIR:-}" ]; then
   fi
 fi
 WIFI_IF=""; for d in /sys/class/net/*/wireless; do [ -e "$d" ] && { WIFI_IF=$(basename "$(dirname "$d")"); break; }; done
+# Active uplink = the default route with the lowest metric (what traffic really uses), read from
+# /proc/net/route with no fork; skips docker/veth bridges. Falls back to the wifi card.
+active_if() {
+  local ifc dst _g _f _r _u met best="" bm=999999
+  while read -r ifc dst _g _f _r _u met _; do
+    [ "$dst" = 00000000 ] && (( met < bm )) && { bm=$met; best=$ifc; }
+  done < /proc/net/route 2>/dev/null
+  NET_IF=${best:-$WIFI_IF}
+}
+active_if
 RXP=0; TXP=0
-if [ -n "$WIFI_IF" ]; then
-  RXP=$(cat "/sys/class/net/$WIFI_IF/statistics/rx_bytes" 2>/dev/null || echo 0)
-  TXP=$(cat "/sys/class/net/$WIFI_IF/statistics/tx_bytes" 2>/dev/null || echo 0)
+if [ -n "$NET_IF" ]; then
+  RXP=$(cat "/sys/class/net/$NET_IF/statistics/rx_bytes" 2>/dev/null || echo 0)
+  TXP=$(cat "/sys/class/net/$NET_IF/statistics/tx_bytes" 2>/dev/null || echo 0)
 fi
 read_cpu; prev_total=$_ctotal; prev_idle=$_cidle
 wsig=0; wstatus="down"; ssid="?"; preset=0; wssid=0; help=0; wifi_tick=99   # caches; preset 0=disk,1=default,2=gpu; wssid toggles SSID in wifi row; help overlay
@@ -295,13 +303,26 @@ while :; do
   done
   ac=""; for a in /sys/class/power_supply/A{C,DP}*; do [ -e "$a/online" ] && { [ "$(cat $a/online)" = 1 ] && ac="AC" || ac="BAT"; break; }; done
 
-  # WIFI status — from sysfs operstate every frame (stable; won't flap on nmcli hiccups).
+  # Uplink — re-pick every frame; on a switch (cable in/out) restart the rx baseline so the
+  # rate doesn't spike, and force a fresh nmcli read when landing back on wifi.
+  prev_if=$NET_IF; active_if
+  if [ "$NET_IF" != "$prev_if" ]; then
+    RXP=$(cat "/sys/class/net/$NET_IF/statistics/rx_bytes" 2>/dev/null || echo 0); wifi_tick=99
+  fi
+  wired=0; [ -n "$NET_IF" ] && [ ! -e "/sys/class/net/$NET_IF/wireless" ] && wired=1
+  nlabel="wifi"; (( wired )) && nlabel="eth "
+  # Status — from sysfs operstate every frame (stable; won't flap on nmcli hiccups).
   wstatus="down"; wup=0
-  if [ -n "$WIFI_IF" ] && [ "$(cat "/sys/class/net/$WIFI_IF/operstate" 2>/dev/null)" = "up" ]; then
+  if [ -n "$NET_IF" ] && [ "$(cat "/sys/class/net/$NET_IF/operstate" 2>/dev/null)" = "up" ]; then
     wstatus="connected"; wup=1
   fi
+  # Wired: link speed straight from sysfs (-1/missing = unknown, keep last); icon instead of signal.
+  if (( wired )); then
+    spd=$(cat "/sys/class/net/$NET_IF/speed" 2>/dev/null)
+    [[ "$spd" =~ ^[0-9]+$ ]] && lspeed=$spd
+    ssid=$NET_IF
   # WIFI signal + link speed — throttled nmcli; KEEP last values if a query fails.
-  if (( wifi_tick >= 5 )); then
+  elif (( wifi_tick >= 5 )); then
     wifi_tick=0
     wline=$(timeout 2 nmcli -t -f ACTIVE,SSID,SIGNAL dev wifi 2>/dev/null | grep -m1 '^yes:')
     if [ -n "$wline" ]; then rest=${wline#yes:}; v=${rest##*:}; s=${rest%:*}
@@ -310,11 +331,11 @@ while :; do
     spd=${spd#*:}; spd=${spd%% *}                 # "CAPABILITIES.SPEED:648 Mb/s" -> "648"
     [[ "$spd" =~ ^[0-9]+$ ]] && lspeed=$spd
   else (( wifi_tick++ )); fi
-  (( wup )) || wsig=0   # empty bars only when truly down
+  (( wup )) || wsig=0   # empty fan only when truly down
   # NET download rate — every frame from rx byte deltas; cache last non-zero, dim when idle.
   delta=0
-  if [ -n "$WIFI_IF" ]; then
-    rxn=$(cat "/sys/class/net/$WIFI_IF/statistics/rx_bytes" 2>/dev/null || echo "$RXP")
+  if [ -n "$NET_IF" ]; then
+    rxn=$(cat "/sys/class/net/$NET_IF/statistics/rx_bytes" 2>/dev/null || echo "$RXP")
     delta=$(( rxn - RXP )); RXP=$rxn; (( delta < 0 )) && delta=0
   fi
   if (( wup )); then
@@ -324,6 +345,10 @@ while :; do
   else
     drate="0B"; lshow=0; wcol="$D"            # only truly down dims both to zero
   fi
+  # Link glyph (3 cells): wired = 󰈀 ethernet port (nerd-font, 1 cell + 2 pad), lit when up;
+  # wifi = fan icon by signal strength.
+  if (( wired )); then (( wup )) && nicon="${A}󰈀${R}  " || nicon="${D}󰈀${R}  "
+  else nicon=$(wifiicon "$wsig" "$wup"); fi
   # status text: default word, or (wssid toggle) the SSID name when connected
   if (( wup )); then (( wssid )) && wshow="${ssid:0:SW}" || wshow="connected"
   else (( wssid )) && wshow="disconnected" || wshow="down"; fi
@@ -339,7 +364,7 @@ while :; do
   fi
   # Middle column: horizontal rows; flanked by two vertical bars (gpu left, fan right).
   mid=(
-    "${D}wifi${R} $(sigbars "$wsig") ${wcol}$(printf '%4s' "$lshow")Mb${R} ${D}·${R} ${wcol}▼ $(printf '%-5s' "$drate")${R}${D}· $(printf "%-${SW}s" "$wshow")${R}"
+    "${D}${nlabel}${R} ${nicon} ${wcol}$(printf '%4s' "$lshow")Mb${R} ${D}·${R} ${wcol}▼ $(printf '%-5s' "$drate")${R}${D}· $(printf "%-${SW}s" "$wshow")${R}"
     ""
     "$(hrow cpu "$cpu" " ${ctemp}°C")"
     ""
