@@ -25,4 +25,9 @@
 	ci = commit
 	lg = log --graph --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset)%C(auto)%d%C(reset)' --all
 	lg2 = log --graph --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset) %C(bold green)- %an%C(reset) %C(dim bold green)(%ar)%C(reset)%C(auto)%d%C(reset)' --all
+	# lg1: one line per commit, never wraps. Hash, time ago (right-aligned in 12),
+	# author (cut to 15), branch tags, then the message cut at the window's right
+	# edge (%<|(-1)). Columns sit right after the graph, so rows with extra branch
+	# lanes shift right a little — the price of no gap after the hash.
+	lg1 = log --graph --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) %C(dim bold green)%>(12,trunc)%ar%C(reset)  %C(bold green)%<(15,trunc)%an%C(reset)%C(auto)%d%C(reset) %C(dim white)%<|(-1,trunc)%s%C(reset)' --all
 	lgf = diff-tree --no-commit-id --name-only -r

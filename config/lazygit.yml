@@ -20,14 +20,31 @@ gui:
       - reverse
 
 git:
+  # lazygit's default (`onlyMainBranches`) silently fast-forwards main/master
+  # after every background fetch, so you never see the "behind" count. Keep
+  # auto-fetch on for the counts, but only move branches when we pull.
+  autoForwardBranches: none
+
   log:
     showWholeGraph: false
 
-  # Local Branches panel [3] — same format as `git lg2`.
-  branchLogCmd: "git log --graph --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset) %C(bold green)- %an%C(reset) %C(dim bold green)(%ar)%C(reset)%C(auto)%d%C(reset)' {{branchName}} --"
+  # `git lg1` layout (git/ko.gitconfig) in a fixed short form: the age in 3 columns (2s, 45m, 29h, 14d, 6w, 2y)
+  # and the author as 2 capitals (Anthony Hampton -> AH; one word -> its first 2 letters, KOrtego20170 -> KO),
+  # message cut at the panel's right edge instead of wrapping. git can't print either, so it prints markers
+  # (@@<unix time>@@, ##<name padded to 20>##) and awk swaps them for the short forms. lazygit runs git with no
+  # terminal, so git can't see the panel width and would assume 80: each command reads the window width from
+  # /dev/tty, takes the log panel's share (sidePanelWidth 0.3333 -> 2/3, minus 2 border cols) and hands it to git
+  # as COLUMNS, plus the 33 columns the markers take beyond the short forms (14 -> 3 and 24 -> 2), so the message
+  # still ends at the edge. The command is a YAML literal block with no double quotes or backslashes inside, so
+  # neither YAML nor lazygit's argument splitter changes it.
+  # Local Branches panel [3]:
+  branchLogCmd: |-
+    sh -c "w=$(stty size </dev/tty 2>/dev/null | cut -d' ' -f2); w=${w:-120}; c=$((w - w/3 - 2 + 33)); COLUMNS=$c git log --graph --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) %C(dim bold green)@@%at@@%C(reset) %C(bold green)##%<(20,trunc)%an##%C(reset)%C(auto)%d%C(reset) %C(dim white)%<|(-1,trunc)%s%C(reset)' {{branchName}} -- | awk -v now=$(date +%s) -v u=smhdwy -v f3=%3s -v f2=%-2s '{ if (match($0, /@@[0-9]+@@/)) { d = now - substr($0, RSTART + 2, RLENGTH - 4); if (d < 0) d = 0; if (d < 60) a = d substr(u, 1, 1); else if (d < 3600) a = int(d / 60) substr(u, 2, 1); else if (d < 86400) a = int(d / 3600) substr(u, 3, 1); else if (d < 2592000) a = int(d / 86400) substr(u, 4, 1); else if (d < 31536000) a = int(d / 604800) substr(u, 5, 1); else a = int(d / 31536000) substr(u, 6, 1); $0 = substr($0, 1, RSTART - 1) sprintf(f3, a) substr($0, RSTART + RLENGTH) } if (match($0, /##[^#]*##/)) { k = split(substr($0, RSTART + 2, RLENGTH - 4), p); i = k > 1 ? substr(p[1], 1, 1) substr(p[k], 1, 1) : substr(p[1], 1, 2); $0 = substr($0, 1, RSTART - 1) sprintf(f2, toupper(i)) substr($0, RSTART + RLENGTH) } print }'"
 
-  # Status panel — cycle these with `a`. First is the `git lg2` format (author +
-  # relative date), second the compact `git lg` format.
+  # Status panel — cycle these with `a`: lg1 layout (as above), then
+  # `git lg2` (author + relative date, wraps), then the compact `git lg`.
   allBranchesLogCmds:
+    - |-
+      sh -c "w=$(stty size </dev/tty 2>/dev/null | cut -d' ' -f2); w=${w:-120}; c=$((w - w/3 - 2 + 33)); COLUMNS=$c git log --graph --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) %C(dim bold green)@@%at@@%C(reset) %C(bold green)##%<(20,trunc)%an##%C(reset)%C(auto)%d%C(reset) %C(dim white)%<|(-1,trunc)%s%C(reset)' --all -- | awk -v now=$(date +%s) -v u=smhdwy -v f3=%3s -v f2=%-2s '{ if (match($0, /@@[0-9]+@@/)) { d = now - substr($0, RSTART + 2, RLENGTH - 4); if (d < 0) d = 0; if (d < 60) a = d substr(u, 1, 1); else if (d < 3600) a = int(d / 60) substr(u, 2, 1); else if (d < 86400) a = int(d / 3600) substr(u, 3, 1); else if (d < 2592000) a = int(d / 86400) substr(u, 4, 1); else if (d < 31536000) a = int(d / 604800) substr(u, 5, 1); else a = int(d / 31536000) substr(u, 6, 1); $0 = substr($0, 1, RSTART - 1) sprintf(f3, a) substr($0, RSTART + RLENGTH) } if (match($0, /##[^#]*##/)) { k = split(substr($0, RSTART + 2, RLENGTH - 4), p); i = k > 1 ? substr(p[1], 1, 1) substr(p[k], 1, 1) : substr(p[1], 1, 2); $0 = substr($0, 1, RSTART - 1) sprintf(f2, toupper(i)) substr($0, RSTART + RLENGTH) } print }'"
     - "git log --graph --all --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset) %C(bold green)- %an%C(reset) %C(dim bold green)(%ar)%C(reset)%C(auto)%d%C(reset)'"
     - "git log --graph --all --color=always --abbrev-commit --decorate --format=format:'%C(bold yellow)%h%C(reset) - %C(dim white)%s%C(reset)%C(auto)%d%C(reset)'"
